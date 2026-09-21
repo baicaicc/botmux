@@ -1,3 +1,4 @@
+import { SharedSessionCreator } from '../src/core/shared-create.js';
 /**
  * Unit tests for command-handler: DAEMON_COMMANDS set and handleCommand routing.
  *
@@ -8067,5 +8068,65 @@ describe('/term — operable terminal slash command (operator / canOperate)', ()
     await handleCommand('/term', ROOT_ID, ownerMsg(), deps, LARK_APP_ID);
     const reply = (deps.sessionReply as ReturnType<typeof vi.fn>).mock.calls[0][1] as string;
     expect(reply).toContain('发送失败');
+  });
+});
+
+
+describe('shared bot native creation', () => {
+  const target = {source:'herdr' as const, cliId:'claude-code' as const, cliPid:4242, panePid:4200,
+    paneCols:100,paneRows:40,cwd:'/native/new',herdrPaneId:'wNew:p1',herdrTerminalId:'term-new',herdrSessionName:'default',sessionId:'native-new'};
+  const created = {id:'case-new',workspacePath:'/native/new',runtimes:{'claude-code':{
+    paneId:'wNew:p1',terminalId:'term-new',herdrSession:'default',sessionId:'native-new'}}};
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(getBot).mockImplementation(defaultGetBot as any);
+    vi.mocked(canOperate).mockReturnValue(true);
+    vi.mocked(validateAdoptTarget).mockReturnValue(true);
+    vi.mocked(discoverAdoptableSessions).mockReturnValue([target]);
+  });
+  it('offers creation even when no running session exists', async () => {
+    process.env.BOTMUX_SHARED_ONLY_APP_ID=LARK_APP_ID;
+    const list=vi.spyOn(SharedSessionCreator.prototype,'list').mockResolvedValue([{id:'cc',revision:1,label:'新模型',harnessId:'claude-code'}]);
+    vi.mocked(discoverAdoptableSessions).mockReturnValue([]);
+    const ds=makeDaemonSession(),deps=makeDeps(ds);
+    try {
+      await handleCommand('/adopt',ROOT_ID,makeLarkMessage('/adopt'),deps,LARK_APP_ID);
+      expect(deps.sessionReply).toHaveBeenCalledWith(ROOT_ID,expect.stringContaining('shared_create'),'interactive',LARK_APP_ID,'msg_001');
+    } finally {list.mockRestore();delete process.env.BOTMUX_SHARED_ONLY_APP_ID;}
+  });
+  it('creates and attaches the exact new native identity; never calls fresh worker', async () => {
+    process.env.BOTMUX_SHARED_ONLY_APP_ID=LARK_APP_ID;
+    const create=vi.spyOn(SharedSessionCreator.prototype,'create').mockResolvedValue(created);
+    const ds=makeDaemonSession(),deps=makeDeps(ds);
+    try {
+      await handleCommand('/adopt',ROOT_ID,makeLarkMessage('/adopt new:cc'),deps,LARK_APP_ID);
+      expect(create).toHaveBeenCalledOnce();
+      expect(ds.adoptedFrom?.sessionId).toBe('native-new');
+      expect(forkAdoptWorker).toHaveBeenCalledWith(ds);
+      expect(forkWorker).not.toHaveBeenCalled();
+    } finally {create.mockRestore();delete process.env.BOTMUX_SHARED_ONLY_APP_ID;}
+  });
+  it('does not create for unauthorized users or bot senders', async () => {
+    process.env.BOTMUX_SHARED_ONLY_APP_ID=LARK_APP_ID;
+    const create=vi.spyOn(SharedSessionCreator.prototype,'create').mockResolvedValue(created);
+    try {
+      vi.mocked(canOperate).mockReturnValue(false);
+      await handleCommand('/adopt',ROOT_ID,makeLarkMessage('/adopt new:cc'),makeDeps(makeDaemonSession()),LARK_APP_ID);
+      vi.mocked(canOperate).mockReturnValue(true);
+      await handleCommand('/adopt',ROOT_ID,makeLarkMessage('/adopt new:cc',{senderType:'app'}),makeDeps(makeDaemonSession()),LARK_APP_ID);
+      expect(create).not.toHaveBeenCalled();
+    } finally {create.mockRestore();delete process.env.BOTMUX_SHARED_ONLY_APP_ID;}
+  });
+  it('does not replace a connection selected while native creation was running', async () => {
+    process.env.BOTMUX_SHARED_ONLY_APP_ID=LARK_APP_ID;
+    const ds=makeDaemonSession(),deps=makeDeps(ds);
+    const existing={cliId:'claude-code' as const,originalCliPid:777,cwd:'/old',sessionId:'old-session'};
+    const create=vi.spyOn(SharedSessionCreator.prototype,'create').mockImplementation(async()=>{ds.adoptedFrom=existing;return created;});
+    try {
+      await handleCommand('/adopt',ROOT_ID,makeLarkMessage('/adopt new:cc'),deps,LARK_APP_ID);
+      expect(ds.adoptedFrom).toBe(existing);
+      expect(forkAdoptWorker).not.toHaveBeenCalled();
+      expect(deps.sessionReply).toHaveBeenCalledWith(ROOT_ID,expect.stringContaining('未替换现有连接'),'text',LARK_APP_ID,'msg_001');
+    } finally {create.mockRestore();delete process.env.BOTMUX_SHARED_ONLY_APP_ID;}
   });
 });

@@ -2496,6 +2496,25 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
   // have exited since render. Live targets re-discover (fast-path by tmux
   // target to stay inside Lark's 3s callback budget); resume targets re-scan
   // disk. The cached entry only tells us WHICH target the key refers to.
+  if (value?.action === 'shared_create' && larkAppId) {
+    const { isSharedOnlyBot } = await import('../../core/shared-only.js');
+    const rootId = typeof value.root_id === 'string' ? value.root_id : '';
+    const profileId = typeof value.profile_id === 'string' ? value.profile_id : '';
+    const ds = activeSessions.get(sessionKey(rootId, larkAppId));
+    if (!isSharedOnlyBot(larkAppId) || !ds || !profileId || !operatorOpenId
+      || !canOperate(larkAppId, ds.chatId, operatorOpenId)
+      || value.invoker_open_id !== operatorOpenId) {
+      return { toast: { type: 'error', content: '无法创建会话：话题已失效或没有操作权限。' } };
+    }
+    // Creation can take longer than Lark's callback budget; ack immediately.
+    void handleCommand('/adopt', rootId, {
+      messageId: cardMessageId || `shared-create-${rootId}`, rootId, senderId: operatorOpenId,
+      senderType: 'user', msgType: 'interactive', content: `/adopt new:${profileId}`, createTime: String(Date.now()),
+    }, { activeSessions, sessionReply: deps.sessionReply, lastRepoScan, getActiveCount: () => activeSessions.size }, larkAppId)
+      .catch(error => logger.error(`Shared session creation failed: ${error instanceof Error ? error.message : String(error)}`));
+    return { toast: { type: 'info', content: '已收到新建请求，结果将回复到当前话题。' } };
+  }
+
   if (value?.action === 'adopt_confirm' && larkAppId) {
     const rootId = value.root_id as string | undefined;
     const entryKey = value.entry_key as string | undefined;
