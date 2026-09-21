@@ -9,6 +9,7 @@ import { supportsZeroPromptInjection } from './core/prompt-injection.js';
 import { SCHEDULE_PROMPT_UNDELIVERED_ERROR_CODE } from './core/deferred-schedule-settlement.js';
 import { supportsTranscriptReplyDeliveryForBot } from './core/reply-delivery.js';
 import { clearBotmuxPromptEnv } from './skills/zero-injection.js';
+import { claudeDataDirForPid } from './services/claude-data-dir.js';
 /**
  * Worker process: manages a single CLI PTY session + web terminal.
  * Forked by the daemon, communicates via Node.js IPC.
@@ -13140,6 +13141,13 @@ async function writeAdoptMessage(
         codexBridgeQueue.finishSubmitVerification(adoptStructuredBridgeTurnId, undefined, dispatchAttempt);
       }
       dropFailedBridgeMark(adoptStructuredBridgeTurnId, dispatchAttempt);
+      if (blockedBeforeWrite && adoptBackend instanceof HerdrBackend) {
+        send({type:'screen_update',content:renderer?.snapshot().content ?? '',status:'stalled',turnId,dispatchAttempt});
+        if (turnId) emitTurnTerminal(turnId, 'failed', 'herdr_input_not_sent', dispatchAttempt, undefined, false);
+        send({type:'user_notify',turnId,dispatchAttempt,message:err.message});
+        redriveRejectedStructuredReady();
+        return 'completed';
+      }
       if (turnId && dispatchAttempt !== undefined && blockedBeforeWrite) {
         // The ZMX recovery hold refused the write, so the input definitely did
         // NOT execute — a genuine retryable failure, not an ambiguous one.
@@ -15834,8 +15842,13 @@ async function runAmbiguousSubmissionTransaction<T>(
   beforeWrite?: () => void | Promise<void>,
 ): Promise<{ result: T; recoveryFailureReason?: string }> {
   if (!target.captureAmbiguousSubmissionFence) {
-    await beforeWrite?.();
-    return { result: await write() };
+    let release: (() => Promise<void>) | undefined;
+    if(target instanceof HerdrBackend) {
+      try {release=await target.acquireSharedInput();}
+      catch(error) {throw new SubmissionWriteError((error as Error).message,(error as Error).message,false);}
+    }
+    try {await beforeWrite?.();return { result: await write() };}
+    finally{try {await release?.();}catch(error){throw new SubmissionWriteError((error as Error).message,(error as Error).message,true);}}
   }
 
   const previous = ambiguousSubmissionWriteTail;
@@ -19235,6 +19248,7 @@ function attachStructuredBridgeAtSpawn(
 async function setupAdoptTranscriptBridges(cfg: Extract<DaemonToWorker, { type: 'init' }>): Promise<void> {
   if (cfg.bridgeJsonlPath) {
     startBridgeWatcher(cfg.bridgeJsonlPath, {
+      dataDir:claudeDataDirForPid(cfg.adoptCliPid),
       cliPid: cfg.adoptCliPid,
       cliCwd: cfg.adoptCwd,
     });
@@ -19993,6 +20007,7 @@ async function spawnCli(
     const target = cfg.adoptHerdrTarget ?? cfg.adoptHerdrPaneId!;
     const herdrBe = new HerdrBackend(cfg.adoptHerdrSessionName, {
       externalTarget: {
+        guardInput:['claude-code','codebuddy','codex'].includes(cfg.cliId || ''),
         sessionName: cfg.adoptHerdrSessionName,
         target,
         paneId: cfg.adoptHerdrPaneId,

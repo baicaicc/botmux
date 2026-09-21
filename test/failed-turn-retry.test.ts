@@ -5,6 +5,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import {
+  RETRY_COOLDOWN_MS,
   shouldRecordFailedTurn,
   buildFailedTurnRecord,
   retryCooldownRemaining,
@@ -159,4 +160,17 @@ describe('markRetryAttempt', () => {
     expect(() => markRetryAttempt(session)).not.toThrow();
     expect(session.lastFailedTurn).toBeUndefined();
   });
+});
+
+describe('RETRY_COOLDOWN_MS', () => {
+  it('is 10 seconds', () => {
+    expect(RETRY_COOLDOWN_MS).toBe(10_000);
+  });
+});
+
+
+it('keeps an unsent shared-terminal message when a local turn is interrupted',()=>{
+  expect(shouldRecordFailedTurn({turnId:'codex-local-interrupted',status:'failed'},undefined,{errorCode:'herdr_input_not_sent'})).toBe(false);
+  expect(shouldRecordFailedTurn({turnId:'local-herdr-interrupted',status:'failed'},undefined,{errorCode:'herdr_input_not_sent'})).toBe(false);
+  expect(shouldRecordFailedTurn({turnId:'new-lark-message',status:'failed'},undefined,{errorCode:'herdr_input_not_sent'})).toBe(true);
 });

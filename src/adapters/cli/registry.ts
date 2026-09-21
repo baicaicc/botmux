@@ -1,3 +1,4 @@
+import {createCodeBuddyAdapter, codebuddyBridgeSpec} from './codebuddy.js';
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -48,6 +49,7 @@ import { createRemoteRunnerAdapter } from './remote-runner.js';
  * instantiate the adapter and trigger its lazy `resolvedBin` shell probes.
  */
 const RAW_CLI_EXECUTABLES: Readonly<Record<CliId, string | undefined>> = {
+  codebuddy: 'codebuddy',
   'claude-code': 'claude',
   seed: 'seed',
   relay: 'relay',
@@ -317,6 +319,7 @@ export { createClaudeCodeAdapter, createSeedAdapter, createRelayAdapter, createA
 /** Synchronous version for use in worker process. */
 export function createCliAdapterSync(id: CliId, pathOverride?: string, opts?: CliAdapterOptions): CliAdapter {
   switch (id.toLowerCase() as CliId) {
+    case 'codebuddy': return createCodeBuddyAdapter(pathOverride);
     case 'claude-code': return createClaudeCodeAdapter(pathOverride, opts?.configDir || undefined);
     case 'seed': return createSeedAdapter(pathOverride);
     case 'relay': return createRelayAdapter(pathOverride);
@@ -368,6 +371,7 @@ export function createCliAdapterSync(id: CliId, pathOverride?: string, opts?: Cl
  */
 export function bridgeSpecFor(cliId: string | undefined): StructuredBridgeSpec | undefined {
   switch (cliId) {
+    case 'codebuddy': return codebuddyBridgeSpec;
     case 'codex': return codexBridgeSpec;
     case 'traex': return traexBridgeSpec;
     case 'coco': return cocoBridgeSpec;
@@ -380,3 +384,5 @@ export function bridgeSpecFor(cliId: string | undefined): StructuredBridgeSpec |
     default: return undefined;
   }
 }
+
+export {createCodeBuddyAdapter} from './codebuddy.js';

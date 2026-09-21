@@ -57,10 +57,11 @@ export const CLI_ID_CHOICES: Record<string, CliId> = {
   '31': 'mimocode',
   '32': 'remote-runner',
   '33': 'codem',
+  // codebuddy 是 fork 自有 CLI 适配器：上游已占用 27-33，按本表约定顺延到 34。
+  '34': 'codebuddy',
 };
 
 const VALID_CLI_IDS: ReadonlySet<string> = new Set(Object.values(CLI_ID_CHOICES));
-
 
 /**
  * 有序 CLI 选项 (id + 展示名), 顺序与 setup 交互菜单 (CLI_ID_CHOICES 序号)

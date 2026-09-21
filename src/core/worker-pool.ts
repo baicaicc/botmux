@@ -1,3 +1,4 @@
+import { claudeDataDirForPid } from '../services/claude-data-dir.js';
 import { CliProgressNotifier, cliProgressNoticeCard } from '../services/cli-progress-notice.js';
 import { listPendingAsks } from './ask-broker.js';
 import { captureCodexCleanupRelease, type CodexCleanupReleaseTicket } from '../services/codex-cleanup-release.js';
@@ -21955,7 +21956,7 @@ export function forkAdoptWorker(
   const hasCliPid = typeof adopted.originalCliPid === 'number';
   const bridgeJsonlPath =
     adoptedCliId === 'claude-code' && adopted.sessionId
-      ? claudeJsonlPathForSession(adopted.sessionId, adopted.cwd)
+      ? claudeJsonlPathForSession(adopted.sessionId, adopted.cwd,claudeDataDirForPid(adopted.originalCliPid))
       : undefined;
   // cursor: worker resolves the agent-transcript JSONL from the adopt pid's
   // open store.db fd (chatId), or from cliSessionId (= chatId) when discovery

@@ -75,6 +75,8 @@ describe('structured-bridge-clis', () => {
     expect(isStructuredBridgeAdoptIdleCli('cursor')).toBe(false);
     expect(isStructuredBridgeAdoptInputCli('mtr')).toBe(true);
     expect(isStructuredBridgeAdoptInputCli('coco')).toBe(true);
+    // codebuddy（fork 自有）：原生 JSONL 桥，adopt 输入放行与其余文件桥一致。
+    expect(isStructuredBridgeAdoptInputCli('codebuddy')).toBe(true);
     expect(isStructuredBridgeAdoptCli('cursor')).toBe(true);
   });
 
@@ -84,6 +86,7 @@ describe('structured-bridge-clis', () => {
     // started Pi turn may suppress the screen-ready heuristic (the custom-tool
     // terminate:true gap is accepted — next user turn HOL-drops the head).
     // grok: user_message_chunk → turn_completed with normalized stop reasons.
+    expect(isStructuredBridgeLifecycleBlockingCli('codebuddy')).toBe(true);
     expect(isStructuredBridgeLifecycleBlockingCli('codex')).toBe(true);
     expect(isStructuredBridgeLifecycleBlockingCli('traex')).toBe(true);
     expect(isStructuredBridgeLifecycleBlockingCli('pi')).toBe(true);
