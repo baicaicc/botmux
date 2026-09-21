@@ -1,3 +1,4 @@
+
 import { shareVcMeetingSummary } from './services/vc-meeting-summary-share.js';
 import { isCurrentBotInChat, resolveUnionIdFromOpenIdStrict } from './im/lark/client.js';
 import { createBotAdminUnionsPublisher } from './services/bot-admin-unions-store.js';
@@ -17,6 +18,7 @@ import { withConfiguredBotOwner } from './core/bot-owner-attribution.js';
 import { readCanonicalBotActorOwnerBindings } from './core/bot-actor-owner-binding.js';
 import { releaseExplicitAskHandoff, hasExplicitAskHandoff } from './core/ask-broker.js';
 import { createExplicitAskContinuation, explicitAskRecoveryRequest } from './core/explicit-ask-continuation.js';
+import { needsSharedSessionPicker, SHARED_SESSION_NOTICE } from './core/shared-only.js';
 import { execFileSync, type ChildProcess } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync, existsSync, mkdirSync, unlinkSync, realpathSync } from 'node:fs';
@@ -24477,6 +24479,12 @@ async function handleNewTopicAdmitted(data: any, ctx: RoutingContext): Promise<v
     return;
   }
 
+
+  if (!isBotSenderType && !isForeignBotSender && needsSharedSessionPicker(larkAppId, cmdContent)) {
+    // Reuse the authorized /adopt command and its picker; never replay the original text.
+    await sessionReply(anchor, SHARED_SESSION_NOTICE, 'text', larkAppId);
+    cmdContent = '/adopt';
+  }
   // 斜杠命令执行段已搬到 executeNewTopicSlash（输入全部显式）；true = 已处理。
   if (await executeNewTopicSlash({
     ctx, data, larkAppId, chatId, chatType, scope, anchor, messageId, replyRootId, replyAnchorId, parsed, resources, cmdContent,
@@ -26885,6 +26893,13 @@ async function handleThreadReplyAdmitted(
     return;
   }
 
+
+  if (!isBotSenderType && !isForeignBot && needsSharedSessionPicker(
+    larkAppId, cmdContent, activeSessions.get(sessionKey(anchor, larkAppId)),
+  )) {
+    await sessionReply(anchor, SHARED_SESSION_NOTICE, 'text', larkAppId);
+    cmdContent = '/adopt';
+  }
   // 斜杠命令执行段已搬到 executeThreadSlash（输入全部显式）；true = 已处理。
   if (await executeThreadSlash({
     ctx, data, larkAppId, scope, anchor, replyRootId, parsed, resources, cmdContent,

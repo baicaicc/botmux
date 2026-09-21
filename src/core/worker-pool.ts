@@ -1,3 +1,4 @@
+
 import { claudeDataDirForPid } from '../services/claude-data-dir.js';
 import { CliProgressNotifier, cliProgressNoticeCard } from '../services/cli-progress-notice.js';
 import { listPendingAsks } from './ask-broker.js';
@@ -16,6 +17,7 @@ import { commitTriggerStreamingCard, discardTriggerStreamingCard, hasPendingTrig
 import { sessionPromptInjection } from './prompt-injection.js';
 import { inheritSessionLaunchConfiguration } from './session-launch-inheritance.js';
 import { sandboxBoolValue, normalizeSandboxMode, normalizeScratchStorage } from '../adapters/cli/sandbox-mode.js';
+import { isSharedOnlyBot, SHARED_LAUNCH_NOTICE } from './shared-only.js';
 /**
  * Worker pool — manages forking, killing, and lifecycle of worker processes.
  * Extracted from daemon.ts for modularity.
@@ -13935,6 +13937,13 @@ export function forkWorker(
     admissionReported = true;
     opts.onAdmission?.(admission);
   };
+  if (isSharedOnlyBot(ds.larkAppId)) {
+    // Shared sessions use forkAdoptWorker, never this fresh/resume launcher.
+    reportAdmission('rejected');
+    void callbacks?.sessionReply(sessionAnchorId(ds), SHARED_LAUNCH_NOTICE, 'text', ds.larkAppId)
+      .catch(err => logger.warn(`Failed to report shared-only launch refusal: ${err}`));
+    return false;
+  }
   const gatedPrompt = typeof promptInput === 'string' ? { content: promptInput } : promptInput;
   const remoteRetirementPhase = remoteRetirementAdmissionPhase(ds);
   if (remoteRetirementPhase) {
