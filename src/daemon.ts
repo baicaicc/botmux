@@ -1,3 +1,4 @@
+import { needsSharedSessionPicker, SHARED_SESSION_NOTICE } from './core/shared-only.js';
 import { execFileSync, type ChildProcess } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync, existsSync, mkdirSync, unlinkSync, watch, readdirSync, realpathSync } from 'node:fs';
@@ -20989,6 +20990,12 @@ async function handleNewTopicAdmitted(data: any, ctx: RoutingContext): Promise<v
     return;
   }
 
+  if (!isBotSenderType && !isForeignBotSender && needsSharedSessionPicker(larkAppId, cmdContent)) {
+    // Reuse the authorized /adopt command and its picker; never replay the original text.
+    await sessionReply(anchor, SHARED_SESSION_NOTICE, 'text', larkAppId);
+    cmdContent = '/adopt';
+  }
+
   // Intercept daemon commands in new topics (no session needed for some commands)
   // acceptSlashFromBots gate: a bot sender's slash command is only routed as a
   // command when this bot opts in (default on). When off, fall through to
@@ -22795,6 +22802,12 @@ async function handleThreadReplyAdmitted(
   // acceptSlashFromBots gate (mirror of the new-topic path): a bot sender's
   // slash is only routed as a command when this bot opts in (default on); when
   // off it falls through to ordinary message handling. Human senders unaffected.
+  if (!isBotSenderType && !isForeignBot && needsSharedSessionPicker(
+    larkAppId, cmdContent, activeSessions.get(sessionKey(anchor, larkAppId)),
+  )) {
+    await sessionReply(anchor, SHARED_SESSION_NOTICE, 'text', larkAppId);
+    cmdContent = '/adopt';
+  }
   const invocation = ctx.messageListener
     ? null
     : ((isBotSenderType || isForeignBot) && !botAcceptsSlashFromBots(larkAppId))
