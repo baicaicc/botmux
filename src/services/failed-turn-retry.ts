@@ -22,7 +22,11 @@ export const RETRY_COOLDOWN_MS = 10_000;
 export function shouldRecordFailedTurn(
   terminal: { turnId: string; status: string },
   currentReplyTargetTurnId: string | undefined,
+  previous?: Pick<FailedTurnRecord, 'errorCode'>,
 ): boolean {
+  // A terminal-local interruption must not replace a Lark message that the
+  // shared-input guard explicitly preserved without sending.
+  if(previous?.errorCode==='herdr_input_not_sent' && /^(?:codex-local-|local-)/.test(terminal.turnId))return false;
   if (terminal.status !== 'failed' && terminal.status !== 'ambiguous') return false;
   if (currentReplyTargetTurnId !== undefined && currentReplyTargetTurnId !== terminal.turnId) {
     return false;

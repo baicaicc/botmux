@@ -423,3 +423,18 @@ describe('adoptTargetLabel / adoptTargetKey', () => {
     expect(adoptTargetKey(tmuxTarget)).toBe('tmux:0:2.0:5678');
   });
 });
+
+
+describe('Codex remote TUI native identity',()=>{
+  it('uses the explicit resumed thread only for a local remote TUI',()=>{
+    const sid='01a0c365-a626-7783-8587-aefcddd0947b';
+    const proc={pid:804,name:'codex',cwd:'/work',argv:['/bin/codex','resume',sid,'--remote','ws://127.0.0.1:49970']};
+    const fx:HerdrFixture={sessions:[{name:'shared',running:true}],agentsBySession:{shared:[]},panesBySession:{shared:[{pane_id:'w1:p1',cwd:'/work',terminal_id:'term'}]},processByPane:{'shared:w1:p1':proc}};
+    installHerdrFixture(fx);
+    expect(discoverAdoptableSessions('codex').find(x=>x.herdrSessionName==='shared')?.sessionId).toBe(sid);
+    proc.argv[4]='ws://remote.example:49970';installHerdrFixture(fx);
+    expect(discoverAdoptableSessions('codex').find(x=>x.herdrSessionName==='shared')?.sessionId).toBeUndefined();
+    proc.argv[4]='ws://127.0.0.1:49970';proc.argv[2]='--last';installHerdrFixture(fx);
+    expect(discoverAdoptableSessions('codex').find(x=>x.herdrSessionName==='shared')?.sessionId).toBeUndefined();
+  });
+});

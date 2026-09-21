@@ -182,3 +182,7 @@ botmux 不重新实现记忆、上下文管理、工具调用、权限体系—�
 - 📄 **License**：[MIT](LICENSE)
 
 <p align="center">好用的话，顺手点个 ⭐ Star 吧 → <a href="https://github.com/deepcoldy/botmux">deepcoldy/botmux</a></p>
+
+## CodeBuddy 原生共享会话（AllInOne）
+
+CodeBuddy Code 使用独立 `codebuddy` 适配，读取 WorkBuddy 内置 CLI 的原生记录。共享 AllInOne 来源时，Stop hook 在原生 transcript 旁的 `<session>.allinone-stops/` 写入结束证据；没有匹配证据时不把 idle 当作成功。CC／CodeBuddy／Codex 的 HERDR 共享输入先申请控制权，遇到草稿、权限交互或占用会保留原消息并拒绝输入，不自动抢占或重发。断开共享不会关闭源 Agent。真实 Lark 三端验收尚待完成。

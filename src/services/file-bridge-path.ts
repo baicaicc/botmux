@@ -1,3 +1,4 @@
+import {codebuddySession,codebuddyTranscript} from './codebuddy-transcript.js';
 /**
  * Pure path lookup for file-based structured-bridge CLIs (JSONL / events).
  *
@@ -44,6 +45,7 @@ export function resolveFileBridgePath(
 
 function resolveBySessionId(cliId: string, sessionId: string, cwd?: string): string | undefined {
   switch (cliId) {
+    case 'codebuddy': return cwd ? codebuddyTranscript(sessionId,cwd):undefined;
     case 'coco': {
       const p = cocoEventsPathForSession(sessionId);
       return existsSync(p) ? p : undefined;
@@ -69,6 +71,7 @@ function resolveBySessionId(cliId: string, sessionId: string, cwd?: string): str
 
 function resolveByPid(cliId: string, pid: number): string | undefined {
   switch (cliId) {
+    case 'codebuddy': {const meta=codebuddySession(pid);return meta?codebuddyTranscript(meta.sessionId,meta.cwd):undefined;}
     case 'coco': {
       const probed = findCocoSessionByPid(pid);
       return probed && existsSync(probed.eventsPath) ? probed.eventsPath : undefined;

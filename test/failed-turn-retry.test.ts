@@ -167,3 +167,10 @@ describe('RETRY_COOLDOWN_MS', () => {
     expect(RETRY_COOLDOWN_MS).toBe(10_000);
   });
 });
+
+
+it('keeps an unsent shared-terminal message when a local turn is interrupted',()=>{
+  expect(shouldRecordFailedTurn({turnId:'codex-local-interrupted',status:'failed'},undefined,{errorCode:'herdr_input_not_sent'})).toBe(false);
+  expect(shouldRecordFailedTurn({turnId:'local-herdr-interrupted',status:'failed'},undefined,{errorCode:'herdr_input_not_sent'})).toBe(false);
+  expect(shouldRecordFailedTurn({turnId:'new-lark-message',status:'failed'},undefined,{errorCode:'herdr_input_not_sent'})).toBe(true);
+});

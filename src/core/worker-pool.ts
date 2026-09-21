@@ -1,3 +1,4 @@
+import {claudeDataDirForPid} from '../services/claude-data-dir.js';
 /**
  * Worker pool — manages forking, killing, and lifecycle of worker processes.
  * Extracted from daemon.ts for modularity.
@@ -16663,7 +16664,7 @@ export function forkAdoptWorker(
   const hasCliPid = typeof adopted.originalCliPid === 'number';
   const bridgeJsonlPath =
     adoptedCliId === 'claude-code' && adopted.sessionId
-      ? claudeJsonlPathForSession(adopted.sessionId, adopted.cwd)
+      ? claudeJsonlPathForSession(adopted.sessionId, adopted.cwd,claudeDataDirForPid(adopted.originalCliPid))
       : undefined;
   // cursor: worker resolves the agent-transcript JSONL from the adopt pid's
   // open store.db fd (chatId), or from cliSessionId (= chatId) when discovery

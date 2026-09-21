@@ -1,3 +1,4 @@
+import {HerdrSharedInput} from './herdr-shared-input.js';
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -12,6 +13,7 @@ const { Terminal } = xtermHeadless;
 export type PersistentBackendType = Exclude<BackendType, 'pty'>;
 
 export interface HerdrExternalTarget {
+  guardInput?: boolean;
   sessionName: string;
   target: string;
   paneId?: string;
@@ -521,6 +523,10 @@ export class HerdrBackend implements SessionBackend {
     if (external) {
       this.actuallyReattached = false;
       this.paneId = external.paneId ?? external.target;
+      if(external.guardInput) {
+        this.sharedBoundary=new HerdrSharedInput(this.sessionName,this.paneId);
+        this.sharedBoundary.pin();
+      }
     } else {
       // Reuse an existing `botmux` agent ONLY when we're genuinely re-attaching
       // to a still-alive session (daemon restart while the herdr server kept
@@ -586,7 +592,22 @@ export class HerdrBackend implements SessionBackend {
     this.startStatusWatcher();
   }
 
+  private sharedInput?: HerdrSharedInput;
+  private sharedBoundary?: HerdrSharedInput;
+
+  async acquireSharedInput(): Promise<(() => Promise<void>) | undefined> {
+    if(!this.opts.externalTarget?.guardInput)return;
+    if(this.sharedInput)throw new Error('共享输入仍在发送，未重复发送。');
+    const input=this.sharedBoundary;
+    if(!input)throw new Error('原共享会话身份未知。');
+    this.sharedInput=input;
+    try {await input.acquire();}catch(error){this.sharedInput=undefined;throw error;}
+    return async()=>{await input.release();if(this.sharedInput===input)this.sharedInput=undefined;};
+  }
+
   write(data: string): boolean {
+    if(this.sharedInput)return this.sharedInput.write(data);
+    if(this.opts.externalTarget?.guardInput)return false;
     if (this.exited) return false;
     const target = this.paneId ?? this.agentName;
     return runHerdr(
@@ -596,10 +617,13 @@ export class HerdrBackend implements SessionBackend {
   }
 
   sendText(text: string): boolean {
+    if(this.sharedInput)return this.sharedInput.text(text);
     return this.write(text);
   }
 
   sendSpecialKeys(...keys: string[]): boolean {
+    if(this.sharedInput)return this.sharedInput.keys(keys);
+    if(this.opts.externalTarget?.guardInput)return false;
     if (this.exited) return false;
     const target = this.paneId ?? this.agentName;
     return runHerdr(
@@ -609,7 +633,7 @@ export class HerdrBackend implements SessionBackend {
   }
 
   pasteText(text: string): boolean {
-    return this.write(text);
+    return this.sendText(text);
   }
 
   resize(cols: number, rows: number): void {
@@ -702,6 +726,7 @@ export class HerdrBackend implements SessionBackend {
   }
 
   kill(): void {
+    this.sharedInput?.release();this.sharedInput=undefined;
     if (this.exited) return;
     this.exited = true;
     this.resetWebTerminal();
@@ -711,6 +736,7 @@ export class HerdrBackend implements SessionBackend {
   }
 
   destroySession(): void {
+    this.sharedInput?.release();this.sharedInput=undefined;
     this.kill();
     // Adopted targets are observation-only. A managed agent placed in a user's
     // existing session owns its pane but never the surrounding herdr session.
@@ -972,14 +998,14 @@ export class HerdrBackend implements SessionBackend {
   private readVisibleAnsi(): string {
     const target = this.paneId ?? this.agentName;
     return readHerdrTextCommand(
-      herdrSessionArgs(this.sessionName, ['agent', 'read', target, '--source', 'visible', '--lines', String(this.rows), '--format', 'ansi']),
+      herdrSessionArgs(this.sessionName, [this.opts.externalTarget?.guardInput?'pane':'agent', 'read', target, '--source', 'visible', '--lines', String(this.rows), '--format', 'ansi']),
     );
   }
 
   private readRecentAnsi(): string {
     const target = this.paneId ?? this.agentName;
     return readHerdrTextCommand(
-      herdrSessionArgs(this.sessionName, ['agent', 'read', target, '--source', 'recent', '--lines', String(READ_LINES), '--format', 'ansi']),
+      herdrSessionArgs(this.sessionName, [this.opts.externalTarget?.guardInput?'pane':'agent', 'read', target, '--source', 'recent', '--lines', String(READ_LINES), '--format', 'ansi']),
     );
   }
 
@@ -996,6 +1022,11 @@ export class HerdrBackend implements SessionBackend {
 
   private poll(): void {
     if (this.exited) return;
+    if(this.opts.externalTarget?.guardInput) {
+      try {this.sharedBoundary?.verify();this.readAndEmitDelta();}
+      catch {this.handleExit(0,null);}
+      return;
+    }
     const agents = this.listAgents();
     if (agents === null) {
       this.agentProbeFailures++;
@@ -1059,7 +1090,7 @@ export class HerdrBackend implements SessionBackend {
    * machine so settled statuses are eligible again on the next turn.
    */
   private startStatusWatcher(currentStatus?: WatchedStatus): void {
-    if (this.exited) return;
+    if (this.exited || (this.opts.externalTarget?.guardInput && !this.getAgent())) return;
     const paneTarget = this.paneId ?? this.agentName;
     if (!paneTarget) return;
     this.stopStatusWatcher();

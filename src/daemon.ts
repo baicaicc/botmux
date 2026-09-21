@@ -26067,7 +26067,7 @@ export async function startDaemon(botIndex?: number): Promise<void> {
         const failedStatus = terminal.status === 'failed' || terminal.status === 'ambiguous'
           ? terminal.status
           : undefined;
-        if (failedStatus && shouldRecordFailedTurn(terminal, ds.currentReplyTarget?.turnId)) {
+        if (failedStatus && shouldRecordFailedTurn(terminal, ds.currentReplyTarget?.turnId, ds.session.lastFailedTurn)) {
           const record = buildFailedTurnRecord(
             { turnId: terminal.turnId, status: failedStatus, errorCode: terminal.errorCode },
             {

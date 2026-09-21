@@ -148,3 +148,7 @@ External applications can use experimental [model proxy mode](docs/model-proxy.m
 - 📄 **License**: [MIT](LICENSE)
 
 <p align="center">If it's useful, drop a ⭐ Star → <a href="https://github.com/deepcoldy/botmux">deepcoldy/botmux</a></p>
+
+## Native CodeBuddy sharing with AllInOne
+
+CodeBuddy Code has a dedicated `codebuddy` adapter for the WorkBuddy bundled CLI. AllInOne Stop hooks record terminal evidence beside the native transcript in `<session>.allinone-stops/`; idle alone never proves success. Shared HERDR input for CC, CodeBuddy and Codex acquires control without takeover and refuses drafts, permission prompts and occupied inputs. Disconnecting releases only the viewer. End-to-end Lark acceptance remains pending.

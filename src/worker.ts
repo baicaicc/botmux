@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import {claudeDataDirForPid} from './services/claude-data-dir.js';
+import {drainCodeBuddyTranscript} from './services/codebuddy-transcript.js';
 /**
  * Worker process: manages a single CLI PTY session + web terminal.
  * Forked by the daemon, communicates via Node.js IPC.
@@ -2296,7 +2298,7 @@ let closeRequested = false;
 let capturedSpawnCommand: string | null = null;
 let deferredTopicOutputTail = '';
 const reportedDeferredTopicRoots = new Set<string>();
-const CLI_DISPLAY_NAMES: Record<string, string> = { 'claude-code': 'Claude', seed: 'Seed', relay: 'Relay', aiden: 'Aiden', coco: 'CoCo', codex: 'Codex', 'codex-app': 'Codex App', cursor: 'Cursor', gemini: 'Gemini', genius: 'Genius', opencode: 'OpenCode', opencode2: 'OpenCode 2', antigravity: 'Antigravity', mtr: 'MTR', hermes: 'Hermes', mira: 'Mira', mir: 'Mir CLI', traex: 'TRAE', pi: 'Pi', copilot: 'Copilot', 'oh-my-pi': 'Oh My Pi', ebsd: 'ebsd', kimi: 'Kimi', grok: 'Grok Build', 'kiro-cli': 'Kiro', riff: 'Riff', reasonix: 'Reasonix', dsh: 'DeepSeek Harness', 'dsh-tui': 'DeepSeek Harness TUI', mojo: 'Mojo', minimax: 'MiniMax' };
+const CLI_DISPLAY_NAMES: Record<string, string> = { codebuddy:'CodeBuddy Code', 'claude-code': 'Claude', seed: 'Seed', relay: 'Relay', aiden: 'Aiden', coco: 'CoCo', codex: 'Codex', 'codex-app': 'Codex App', cursor: 'Cursor', gemini: 'Gemini', genius: 'Genius', opencode: 'OpenCode', opencode2: 'OpenCode 2', antigravity: 'Antigravity', mtr: 'MTR', hermes: 'Hermes', mira: 'Mira', mir: 'Mir CLI', traex: 'TRAE', pi: 'Pi', copilot: 'Copilot', 'oh-my-pi': 'Oh My Pi', ebsd: 'ebsd', kimi: 'Kimi', grok: 'Grok Build', 'kiro-cli': 'Kiro', riff: 'Riff', reasonix: 'Reasonix', dsh: 'DeepSeek Harness', 'dsh-tui': 'DeepSeek Harness TUI', mojo: 'Mojo', minimax: 'MiniMax' };
 function cliName(): string {
   return (lastInitConfig?.cliRuntime?.source === 'configured'
     ? (lastInitConfig.cliRuntime.displayName?.trim() || lastInitConfig.cliRuntime.id)
@@ -6741,6 +6743,7 @@ function structuredBridgeIngestPath(
   offset: number,
   opts: { flushOmpTrailingFinal?: boolean } = {},
 ) {
+  if (lastInitConfig?.cliId==='codebuddy') return drainCodeBuddyTranscript(path,offset);
   if (structuredBridgeIsCodex()) return drainCodexRollout(path, offset);
   // adoptMode gates the drainer's bare-sentinel synthesis: adopt posts
   // transcript text verbatim, so a synthesised token would leak into Lark.
@@ -8892,6 +8895,13 @@ async function writeAdoptMessage(
         codexBridgeQueue.finishSubmitVerification(adoptStructuredBridgeTurnId, undefined, dispatchAttempt);
       }
       dropFailedBridgeMark(adoptStructuredBridgeTurnId, dispatchAttempt);
+      if (blockedBeforeWrite && adoptBackend instanceof HerdrBackend) {
+        send({type:'screen_update',content:renderer?.snapshot().content ?? '',status:'stalled',turnId,dispatchAttempt});
+        if (turnId) emitTurnTerminal(turnId, 'failed', 'herdr_input_not_sent', dispatchAttempt, undefined, false);
+        send({type:'user_notify',turnId,dispatchAttempt,message:err.message});
+        redriveRejectedStructuredReady();
+        return 'completed';
+      }
       if (turnId && dispatchAttempt !== undefined && blockedBeforeWrite) {
         // The ZMX recovery hold refused the write, so the input definitely did
         // NOT execute — a genuine retryable failure, not an ambiguous one.
@@ -10672,8 +10682,13 @@ async function runAmbiguousSubmissionTransaction<T>(
   beforeWrite?: () => void | Promise<void>,
 ): Promise<{ result: T; recoveryFailureReason?: string }> {
   if (!target.captureAmbiguousSubmissionFence) {
-    await beforeWrite?.();
-    return { result: await write() };
+    let release: (() => Promise<void>) | undefined;
+    if(target instanceof HerdrBackend) {
+      try {release=await target.acquireSharedInput();}
+      catch(error) {throw new SubmissionWriteError((error as Error).message,(error as Error).message,false);}
+    }
+    try {await beforeWrite?.();return { result: await write() };}
+    finally{try {await release?.();}catch(error){throw new SubmissionWriteError((error as Error).message,(error as Error).message,true);}}
   }
 
   const previous = ambiguousSubmissionWriteTail;
@@ -13129,6 +13144,7 @@ function stopScreenUpdates(): void {
 function setupAdoptTranscriptBridges(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
   if (cfg.bridgeJsonlPath) {
     startBridgeWatcher(cfg.bridgeJsonlPath, {
+      dataDir:claudeDataDirForPid(cfg.adoptCliPid),
       cliPid: cfg.adoptCliPid,
       cliCwd: cfg.adoptCwd,
     });
@@ -13241,7 +13257,7 @@ function setupAdoptTranscriptBridges(cfg: Extract<DaemonToWorker, { type: 'init'
       codexAdoptPendingPid = cfg.adoptCliPid;
       codexBridgeStartTimer();
     }
-  } else if (cfg.cliId === 'pi' || cfg.cliId === 'grok') {
+  } else if (cfg.cliId === 'pi' || cfg.cliId === 'grok' || cfg.cliId === 'codebuddy') {
     // File-backed bridges share the same adopt attach skeleton (sid → pid →
     // split-live | pending). Path lookup is resolveFileBridgePath; pi is
     // intentionally folded here with grok so the two stay in lockstep.
@@ -13562,6 +13578,7 @@ async function spawnCli(
     const target = cfg.adoptHerdrTarget ?? cfg.adoptHerdrPaneId!;
     const herdrBe = new HerdrBackend(cfg.adoptHerdrSessionName, {
       externalTarget: {
+        guardInput:['claude-code','codebuddy','codex'].includes(cfg.cliId || ''),
         sessionName: cfg.adoptHerdrSessionName,
         target,
         paneId: cfg.adoptHerdrPaneId,
@@ -17131,7 +17148,7 @@ async function spawnCli(
     } else {
       codexBridgeStartTimer();
     }
-  } else if (cfg.cliId === 'pi' || cfg.cliId === 'grok' || cfg.cliId === 'oh-my-pi' || cfg.cliId === 'ebsd') {
+  } else if (cfg.cliId === 'pi' || cfg.cliId === 'grok' || cfg.cliId === 'codebuddy' || cfg.cliId === 'oh-my-pi' || cfg.cliId === 'ebsd') {
     // File-backed: pin path when known (pi session id / grok --session-id
     // UUID), else arm the poller. Grok collision-fallback (dir already
     // exists → no --session-id → grok mints id) is recovered via writeInput
