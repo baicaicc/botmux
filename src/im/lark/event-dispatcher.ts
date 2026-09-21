@@ -4,6 +4,7 @@
  * Extracted from daemon.ts for modularity.
  */
 import * as Lark from '@larksuiteoapi/node-sdk';
+import { isExternalTaskDm } from './external-task-dm.js';
 import { startLarkConnection } from './transport/connection.js';
 import { readFileSync, mkdirSync, existsSync } from 'node:fs';
 import { atomicWriteFileSync } from '../../utils/atomic-write.js';
@@ -4768,6 +4769,7 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
     'im.message.reaction.created_v1': () => {},
     'im.message.reaction.deleted_v1': () => {},
     'im.message.receive_v1': (data: any) => {
+      if (isExternalTaskDm(larkAppId, data?.message)) return;
       // Dedupe by message_id (stable across re-pushes / event_id re-mints /
       // daemon restarts), persisted so the 6h re-push tier or a restart can't
       // replay an already-handled message. Fall back to the in-memory event-id
