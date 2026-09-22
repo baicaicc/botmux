@@ -1,4 +1,3 @@
-import { SharedSessionCreator, buildSharedCreateCard } from './shared-create.js';
 import { isSharedOnlyBot } from './shared-only.js';
 /**
  * Command handler — processes /slash commands from users.
@@ -3838,29 +3837,6 @@ export async function handleCommand(
         }
 
         const botCliId = botCfgForAdopt?.cliId;
-        if (isSharedOnlyBot(larkAppId ?? ds?.larkAppId)) {
-          if (adoptArgs.startsWith('new:')) {
-            if (!ds || message.senderType !== 'user' || !message.senderId || !canOperate(ds.larkAppId, ds.chatId, message.senderId, message.senderUnionId)) {
-              await sessionReply(rootId, '没有创建会话的权限。');
-              break;
-            }
-            if (adoptSandboxBlocked(botCfgForAdopt!, ds.session)) {
-              await sessionReply(rootId, t('cmd.adopt.sandbox_blocked', undefined, loc));
-              break;
-            }
-            await createSharedSession(adoptArgs.slice(4), rootId, ds, deps, message.messageId);
-            break;
-          }
-          if (!adoptArgs) {
-            try {
-              const profiles = await new SharedSessionCreator().list(botCliId || '');
-              if (profiles.length) await sessionReply(rootId, buildSharedCreateCard(profiles, rootId, message.senderId || ''), 'interactive');
-              else await sessionReply(rootId, '当前 Agent 暂无可创建的原生模型通道；下方仍可连接已有会话。');
-            } catch (error) {
-              await sessionReply(rootId, `新建会话入口暂不可用：${error instanceof Error ? error.message : String(error)}。仍可连接已有会话。`);
-            }
-          }
-        }
         const adoptSession = ds?.session;
         const adoptAnchor = ds ? sessionAnchorId(ds) : undefined;
         const directTarget = adoptArgs;
@@ -5715,7 +5691,6 @@ export async function startAdoptSession(
   ds: DaemonSession,
   deps: CommandHandlerDeps,
   larkAppId?: string,
-  requireUnbound = false,
 ): Promise<void> {
   if (ds.session.cliInstanceBinding) throw new Error('A bound Codex instance session cannot adopt an external process; use a new session');
   const sessionReply = (rid: string, content: string, msgType?: string) =>
@@ -5786,7 +5761,7 @@ export async function startAdoptSession(
       candidate => candidate.session.sessionId === targetSessionId
         && candidate.session.status === 'active',
     );
-    if (!current || current !== ds || requireUnbound && (current.adoptedFrom || current.session.existingAppServerEndpoint)) return { status: 'gone' as const };
+    if (!current || current !== ds) return { status: 'gone' as const };
     if (hasProtectedSessionMutationOwnership(current)) {
       return { status: 'pending' as const, anchor: sessionAnchorId(current) };
     }
@@ -6188,35 +6163,4 @@ async function upsertForkPanelCard(
       );
     }
   }
-}
-
-// One creation at a time per topic. The HTTP mutation key also survives daemon restarts.
-const sharedCreationFlights = new Set<string>();
-export async function createSharedSession(profileId: string, rootId: string, ds: DaemonSession, deps: CommandHandlerDeps, turnId?: string): Promise<void> {
-  const key = sessionKey(rootId, ds.larkAppId);
-  const reply = (text: string) => deps.sessionReply(rootId, text, 'text', ds.larkAppId, turnId);
-  if (sharedCreationFlights.has(key)) { await reply('新会话正在创建，请稍候。'); return; }
-  if (ds.adoptedFrom || ds.session.existingAppServerEndpoint || isSessionTransferring(ds)) {
-    await reply('当前话题已有会话或正在切换，请在新话题创建。'); return;
-  }
-  sharedCreationFlights.add(key);
-  try {
-    await reply('正在创建新会话，完成后会连接到当前话题。');
-    const cliId = getBot(ds.larkAppId).config.cliId;
-    const created = await new SharedSessionCreator().create(cliId, profileId, ds.larkAppId, rootId);
-    if (deps.activeSessions.get(key) !== ds || ds.session.status !== 'active' || ds.adoptedFrom || isSessionTransferring(ds)) {
-      await reply(`会话 ${created.id} 已创建，但当前话题状态已变化；未替换现有连接，可用 /adopt 连接。`); return;
-    }
-    const binding = Object.values(created.runtimes || {}).find(item => item.terminalId);
-    if (!binding) throw new Error('新会话缺少原生终端绑定。');
-    const { discoverAdoptableSessions } = await import('./session-discovery.js');
-    const target = discoverAdoptableSessions(cliId).find(item => item.source === 'herdr'
-      && item.herdrTerminalId === binding.terminalId && item.herdrSessionName === (binding.herdrSession || 'default')
-      && item.cwd === created.workspacePath && item.sessionId === binding.sessionId);
-    if (!target) { await reply(`会话 ${created.id} 已创建，原生进程尚未可连接。请稍后用 /adopt 连接；不会重复创建。`); return; }
-    await startAdoptSession(target, ds, deps, ds.larkAppId, true);
-    if (deps.activeSessions.get(key)?.adoptedFrom?.herdrTerminalId === binding.terminalId) await reply(`新会话已创建并连接（${created.id}）。请在当前话题发送任务。`);
-  } catch (error) {
-    await reply(`新建会话未完成：${error instanceof Error ? error.message : String(error)}`);
-  } finally { sharedCreationFlights.delete(key); }
 }

@@ -29,9 +29,15 @@ vi.mock('node-pty', () => ({
   spawn: vi.fn(),
 }));
 
+vi.mock('../src/services/codebuddy-transcript.js', async importOriginal => ({
+  ...await importOriginal<typeof import('../src/services/codebuddy-transcript.js')>(),
+  codebuddySession: vi.fn(),
+}));
+
 import { execFileSync, spawn } from 'node:child_process';
 import * as pty from 'node-pty';
 import { HerdrBackend } from '../src/adapters/backend/herdr-backend.js';
+import { codebuddySession } from '../src/services/codebuddy-transcript.js';
 
 const mockedExecFileSync = vi.mocked(execFileSync);
 const mockedSpawn = vi.mocked(spawn);
@@ -365,6 +371,47 @@ describe('HerdrBackend connection surface', () => {
 // ─── spawn(): fresh / existing / external ──────────────────────────────────
 
 describe('HerdrBackend.spawn', () => {
+  it('launches native CodeBuddy with its own verified identity and releases only the viewer', () => {
+    const nativeId = '00000000-0000-4000-8000-000000000001';
+    vi.mocked(codebuddySession).mockReturnValue({sessionId:nativeId,cwd:'/work'});
+    const captured = setManagedLaunchResponses('codebuddy', [
+      {match:a=>a.includes('process-info'),reply:()=>JSON.stringify({result:{process_info:{shell_pid:10,foreground_processes:[{pid:42,argv:['/opt/WorkBuddy/codebuddy']}]}}})},
+      {match:a=>a.includes('pane')&&a.includes('get'),reply:()=>JSON.stringify({result:{pane:{terminal_id:'term_native',cwd:'/work',agent_status:'unknown'}}})},
+    ]);
+    const mock = mockedExecFileSync.getMockImplementation()!;
+    mockedExecFileSync.mockImplementation(((cmd:any,...args:any[]) => cmd==='ps' ? 'original birth time' : (mock as any)(cmd,...args)) as any);
+    const be = new HerdrBackend(SESSION);
+    try {
+      be.spawn('/opt/WorkBuddy/codebuddy',['--session-id',nativeId,'--model','hy3'],{
+        cwd:'/work',cols:120,rows:40,env:{PATH:'/usr/bin',CODEBUDDY_API_KEY:'parent-only',CODEX_THREAD_ID:'parent-only',CLAUDECODE:'1',TERM_PROGRAM:'WorkBuddy',HTTP_PROXY:'http://localhost:7899'},
+      });
+      expect(herdrCall('pane','report-agent')).toEqual(['--session',SESSION,'pane','report-agent',MANAGED_PANE,'--source','botmux-codebuddy','--agent','codebuddy','--state','unknown','--agent-session-id',nativeId]);
+      expect(herdrCall('agent','start')).toBeUndefined();
+      expect(captured.launcherScript).toContain("'--model' 'hy3'");
+      const env = herdrCall('workspace','create')!.join(' ');
+      expect(env).not.toContain('parent-only');
+      expect(env).toContain('TERM_PROGRAM=herdr');
+      expect(env).toContain('HTTP_PROXY=http://localhost:7899');
+      expect(be.getChildPid()).toBe(42);
+    } finally {be.kill();vi.mocked(codebuddySession).mockReset();}
+    expect(herdrCall('workspace','close')).toBeUndefined();
+    expect(herdrCall('pane','close')).toBeUndefined();
+    expect(herdrCall('session','stop')).toBeUndefined();
+  });
+
+  it('rejects a replacement CodeBuddy native identity and closes only its new workspace', () => {
+    vi.mocked(codebuddySession).mockReturnValue({sessionId:'00000000-0000-4000-8000-000000000002',cwd:'/work'});
+    setManagedLaunchResponses('codebuddy', [
+      {match:a=>a.includes('process-info'),reply:()=>JSON.stringify({result:{process_info:{foreground_processes:[{pid:42,argv:['codebuddy']}]}}})},
+    ]);
+    const be = new HerdrBackend(SESSION);
+    try {
+      expect(()=>be.spawn('codebuddy',['--resume','00000000-0000-4000-8000-000000000001'],{cwd:'/work',cols:120,rows:40,env:{}})).toThrow(/原生会话不一致/);
+      expect(herdrCall('workspace','close')).toEqual(['--session',SESSION,'workspace','close',MANAGED_WORKSPACE]);
+      expect(herdrCall('pane','report-agent')).toBeUndefined();
+    } finally {be.kill();vi.mocked(codebuddySession).mockReset();}
+  });
+
   it.each([
     { label: 'prompt-file', prompt: '@/tmp/initial.prompt.md', explicitCliBin: true },
     { label: 'multiline', prompt: 'line one\nline two', explicitCliBin: false },
