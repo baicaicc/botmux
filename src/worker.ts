@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import {claudeDataDirForPid} from './services/claude-data-dir.js';
-import {drainCodeBuddyTranscript} from './services/codebuddy-transcript.js';
+import {codebuddySession,drainCodeBuddyTranscript} from './services/codebuddy-transcript.js';
 /**
  * Worker process: manages a single CLI PTY session + web terminal.
  * Forked by the daemon, communicates via Node.js IPC.
@@ -16901,6 +16901,13 @@ async function spawnCli(
   // can verify they were spawned inside a botmux session by walking the
   // process tree and looking for a matching pid file in this directory.
   const cliPid = backend.getChildPid?.();
+  if (cfg.cliId === 'codebuddy' && cliPid) {
+    const native = codebuddySession(cliPid);
+    if (!native || native.cwd !== cfg.workingDir || native.sessionId !== (effectiveCliSessionId ?? effectiveAdapterSessionId)) {
+      throw new Error('CodeBuddy 原生会话身份不符；未连接替代会话。');
+    }
+    persistCliSessionId(native.sessionId);
+  }
   if (cfg.existingAppServerEndpoint !== undefined) {
     // The local `codex --remote` client does not own the selected rollout fd;
     // writeInput must accept only the explicitly bound remote thread in the

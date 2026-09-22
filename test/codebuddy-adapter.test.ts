@@ -1,5 +1,5 @@
 import {it,expect} from 'vitest';
-import {mkdtempSync,readFileSync,rmSync,readdirSync,existsSync} from 'node:fs';
+import {mkdtempSync,readFileSync,rmSync,readdirSync,existsSync,mkdirSync,writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {fileURLToPath} from 'node:url';
@@ -38,4 +38,20 @@ it('writes Stop evidence only for the matching native session and generation',()
     expect(JSON.parse(readFileSync(join(directory,'final.json'),'utf8'))).toMatchObject({sessionId:sid,generationId:'final',event:'Stop'});
     expect(readdirSync(directory)).toEqual(['final.json']);
   } finally {rmSync(home,{recursive:true,force:true});}
+});
+
+it('recovers an older owned id only from its exact native transcript',()=>{
+  const home=mkdtempSync(join(tmpdir(),'codebuddy-old-session-')),oldHome=process.env.HOME;
+  process.env.HOME=home;
+  try {
+    const adapter=createCodeBuddyAdapter('/opt/WorkBuddy/codebuddy');
+    const directory=join(home,'.codebuddy','projects','work');mkdirSync(directory,{recursive:true});
+    const file=join(directory,`${sid}.jsonl`);
+    const args=()=>adapter.buildArgs({sessionId:sid,resume:true,workingDir:'/work'});
+    writeFileSync(file,'');expect(args).toThrow(/原 session/);
+    writeFileSync(file,JSON.stringify({type:'message',role:'user',id:'u1',sessionId:sid,content:[{type:'input_text',text:'hello'}],timestamp:1})+'\n');
+    expect(args()).toContain('--resume');expect(args()).toContain(sid);
+    writeFileSync(file,JSON.stringify({sessionId:'00000000-0000-4000-8000-000000000002'})+'\n');
+    expect(args).toThrow(/mismatch/);
+  } finally {if(oldHome===undefined)delete process.env.HOME;else process.env.HOME=oldHome;rmSync(home,{recursive:true,force:true});}
 });

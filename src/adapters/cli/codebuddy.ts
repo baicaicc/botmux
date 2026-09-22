@@ -4,11 +4,19 @@ import {join,dirname} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {resolveCommand} from './registry.js';
 import type {CliAdapter} from './types.js';
+import {codebuddyTranscript,drainCodeBuddyTranscript} from '../../services/codebuddy-transcript.js';
 export function createCodeBuddyAdapter(pathOverride?:string):CliAdapter {
   return {
     id:'codebuddy',
     get resolvedBin(){return resolveCommand(pathOverride ?? 'codebuddy');},
     buildArgs({sessionId,resume,resumeSessionId,model,workingDir,settingsFilePath}) {
+      // Older managed sessions predate daemon persistence of the native id.
+      // Their explicit --session-id equals the BotMux id; only recover it
+      // when that exact cwd-scoped native transcript confirms the identity.
+      if (resume && !resumeSessionId && workingDir) {
+        const file = codebuddyTranscript(sessionId, workingDir);
+        if (file && drainCodeBuddyTranscript(file, 0).events.some(event => event.sourceSessionId === sessionId)) resumeSessionId = sessionId;
+      }
       if(resume && !resumeSessionId)throw new Error('CodeBuddy 恢复必须指定原 session。');
       const nativeId = resume ? resumeSessionId! : sessionId;
       if (!/^[0-9a-f-]{36}$/i.test(nativeId) || !workingDir) throw new Error('CodeBuddy 需要明确的原生身份与工作目录。');

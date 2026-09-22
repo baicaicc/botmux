@@ -36,7 +36,7 @@ export class HerdrSharedInput {
     try {nativeSessionId=this.codebuddyPid?codebuddySession(this.codebuddyPid)?.sessionId:JSON.parse(readFileSync(join(claudeDataDirForPid(processes[0].pid),'sessions',`${processes[0].pid}.json`),'utf8')).sessionId;}catch{}
     return JSON.stringify({terminal:this.terminalId,cwd:pane.cwd,identities,nativeSessionId});
   }
-  pin():void {this.source=this.inspect();}
+  pin():number|undefined {this.source=this.inspect();return this.codebuddyPid;}
   verify():void {if(this.inspect()!==this.source)throw new Error('原 Agent 身份已变化。');}
   async acquire():Promise<void> {
     if(!this.source || this.inspect()!==this.source)throw new Error('原 Agent 已退出或被替换；消息保留，未发送。');

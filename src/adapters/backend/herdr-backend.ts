@@ -589,7 +589,12 @@ export class HerdrBackend implements SessionBackend {
 
     if (basename(opts.cliBin ?? bin) === 'codebuddy' && !external && this.paneId) {
       this.sharedBoundary = new HerdrSharedInput(this.sessionName, this.paneId);
-      this.sharedBoundary.pin();
+      this.cliPid = this.sharedBoundary.pin();
+      const native = this.cliPid ? codebuddySession(this.cliPid) : undefined;
+      const identityFlag = args.findIndex(arg => arg === '--session-id' || arg === '--resume');
+      if (!native || identityFlag < 0 || native.sessionId !== args[identityFlag + 1] || native.cwd !== opts.cwd) {
+        throw new Error('CodeBuddy 接入身份与请求的原生会话不一致；未连接替代会话。');
+      }
     }
     this.started = true;
     // Baseline policy mirrors the tmux/PTY backends:
