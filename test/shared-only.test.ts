@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test';
+import { describe, expect, test } from 'vitest';
 import { isSharedOnlyBot, needsSharedSessionPicker } from '../src/core/shared-only.js';
 const env = { BOTMUX_SHARED_ONLY_APP_ID: 'allinone' };
 describe('externally managed native sessions', () => {

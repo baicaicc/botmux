@@ -1,4 +1,5 @@
 import {HerdrSharedInput} from './herdr-shared-input.js';
+import {codebuddySession} from '../../services/codebuddy-transcript.js';
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -228,6 +229,13 @@ function paneAgentKindForExecutable(bin: string, cliId?: string): string | undef
 
 function environmentForPaneAgent(bin: string, childEnv: Record<string, string> | undefined): Record<string, string> {
   const env = { ...(childEnv ?? {}) };
+  if (basename(bin) === 'codebuddy') {
+    for (const key of Object.keys(env)) {
+      if (key.startsWith('CODEBUDDY_') || key.startsWith('CODEX_') || key === 'CLAUDECODE' || key === 'CLAUDE_CODE_SESSION_ID') delete env[key];
+    }
+    env.TERM_PROGRAM = 'herdr';
+    delete env.TERM_PROGRAM_VERSION;
+  }
   if (!isAbsolute(bin)) return env;
   const binDir = dirname(bin);
   const currentPath = env.PATH ?? process.env.PATH ?? '';
@@ -731,6 +739,10 @@ export class HerdrBackend implements SessionBackend {
       }
     }
 
+    if (basename(opts.cliBin ?? bin) === 'codebuddy' && !external && this.paneId) {
+      this.sharedBoundary = new HerdrSharedInput(this.sessionName, this.paneId);
+      this.sharedBoundary.pin();
+    }
     this.started = true;
     // Baseline for grid-change detection: the grid getPaneSize() advertises
     // right now, spawn-time fallback included (see externalGridChanged()).
@@ -751,7 +763,7 @@ export class HerdrBackend implements SessionBackend {
   private sharedBoundary?: HerdrSharedInput;
 
   async acquireSharedInput(): Promise<(() => Promise<void>) | undefined> {
-    if(!this.opts.externalTarget?.guardInput)return;
+    if(!this.sharedBoundary)return;
     if(this.sharedInput)throw new Error('共享输入仍在发送，未重复发送。');
     const input=this.sharedBoundary;
     if(!input)throw new Error('原共享会话身份未知。');
@@ -763,7 +775,7 @@ export class HerdrBackend implements SessionBackend {
   write(data: string): boolean {
     this.wakePolling();
     if(this.sharedInput)return this.sharedInput.write(data);
-    if(this.opts.externalTarget?.guardInput)return false;
+    if(this.sharedBoundary)return false;
     if (this.exited) return false;
     const target = this.paneId ?? this.agentName;
     // Linux caps a SINGLE argv element at MAX_ARG_STRLEN (32 pages = 131072
@@ -792,7 +804,7 @@ export class HerdrBackend implements SessionBackend {
   sendSpecialKeys(...keys: string[]): boolean {
     this.wakePolling();
     if(this.sharedInput)return this.sharedInput.keys(keys);
-    if(this.opts.externalTarget?.guardInput)return false;
+    if(this.sharedBoundary)return false;
     if (this.exited) return false;
     const target = this.paneId ?? this.agentName;
     return runHerdr(
@@ -1118,7 +1130,9 @@ export class HerdrBackend implements SessionBackend {
     // Identify the managed kind by the original CLI; the launcher still
     // executes the complete wrapped command.
     const cliBin = opts.cliBin ?? bin;
-    const kind = paneAgentKindForExecutable(cliBin, opts.cliId);
+    // CodeBuddy 是普通终端进程，按自有 label 上报，不冒充内置 Herdr agent kind。
+    const isCodeBuddy = basename(cliBin) === 'codebuddy';
+    const kind = isCodeBuddy ? 'codebuddy' : paneAgentKindForExecutable(cliBin, opts.cliId);
     if (!kind) {
       throw new Error(
         `Herdr >=0.7.5 cannot launch executable "${basename(cliBin)}" as a managed coding agent; ` +
@@ -1218,6 +1232,32 @@ export class HerdrBackend implements SessionBackend {
         herdrSessionArgs(this.sessionName, ['pane', 'run', paneId, shellSingleQuote(launcher.path)]),
         { timeout: 5000, env: this.childEnv, allowEmpty: true },
       );
+
+      if (isCodeBuddy) {
+        const deadline = Date.now() + PANE_AGENT_START_TIMEOUT_MS;
+        let native: ReturnType<typeof codebuddySession>;
+        while (Date.now() < deadline) {
+          const info = requiredJsonCommand('CodeBuddy process identity',
+            herdrSessionArgs(this.sessionName, ['pane', 'process-info', '--pane', paneId]));
+          const processes = info?.result?.process_info?.foreground_processes ?? [];
+          const candidates = processes.filter((p: any) => (p.argv ?? [p.argv0]).some((arg: unknown) =>
+            typeof arg === 'string' && basename(arg) === 'codebuddy'));
+          if (candidates.length === 1 && (native = codebuddySession(candidates[0].pid))) {
+            const identityFlag = args.findIndex(arg => arg === '--session-id' || arg === '--resume');
+            if (identityFlag < 0 || native.sessionId !== args[identityFlag + 1] || native.cwd !== opts.cwd) {
+              throw new Error('CodeBuddy 启动身份与请求的原生会话不一致；未连接替代会话。');
+            }
+            this.cliPid = candidates[0].pid;
+            break;
+          }
+          sleepSync(PANE_AGENT_DETECTION_POLL_MS);
+        }
+        if (!native) throw new Error('CodeBuddy 原生进程身份尚未确认。');
+        requiredJsonCommand('Report CodeBuddy terminal identity', herdrSessionArgs(this.sessionName, [
+          'pane', 'report-agent', paneId, '--source', 'botmux-codebuddy', '--agent', 'codebuddy',
+          '--state', 'unknown', '--agent-session-id', native.sessionId,
+        ]), {allowEmpty:true});
+      }
 
       const detectionDeadline = Date.now() + PANE_AGENT_START_TIMEOUT_MS;
       let detected = false;
@@ -1390,14 +1430,14 @@ export class HerdrBackend implements SessionBackend {
   private readVisibleAnsi(): string {
     const target = this.paneId ?? this.agentName;
     return readHerdrTextCommand(
-      herdrSessionArgs(this.sessionName, [this.opts.externalTarget?.guardInput?'pane':'agent', 'read', target, '--source', 'visible', '--lines', String(this.getPaneSize()?.rows ?? this.rows), '--format', 'ansi']),
+      herdrSessionArgs(this.sessionName, [this.sharedBoundary?'pane':'agent', 'read', target, '--source', 'visible', '--lines', String(this.getPaneSize()?.rows ?? this.rows), '--format', 'ansi']),
     );
   }
 
   private readRecentAnsi(): string {
     const target = this.paneId ?? this.agentName;
     return readHerdrTextCommand(
-      herdrSessionArgs(this.sessionName, [this.opts.externalTarget?.guardInput?'pane':'agent', 'read', target, '--source', 'recent', '--lines', String(READ_LINES), '--format', 'ansi']),
+      herdrSessionArgs(this.sessionName, [this.sharedBoundary?'pane':'agent', 'read', target, '--source', 'recent', '--lines', String(READ_LINES), '--format', 'ansi']),
     );
   }
 
@@ -1448,7 +1488,7 @@ export class HerdrBackend implements SessionBackend {
 
   private poll(): void {
     if (this.exited) return;
-    if(this.opts.externalTarget?.guardInput) {
+    if(this.sharedBoundary) {
       try {this.sharedBoundary?.verify();this.readAndEmitDelta();}
       catch {this.handleExit(0,null);}
       return;

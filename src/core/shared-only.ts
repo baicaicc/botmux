@@ -10,5 +10,5 @@ export function needsSharedSessionPicker(appId: string, content: string, session
     && !session?.session.existingAppServerEndpoint && !content.trim().startsWith('/');
 }
 
-export const SHARED_SESSION_NOTICE = '这个话题还没有连接会话。你可以在下方新建会话，也可以连接已有会话。刚才的消息尚未发送给 Agent，连接后请重新发送；原消息仍保留在话题中。';
-export const SHARED_LAUNCH_NOTICE = '请发送 /adopt 新建会话或连接已有会话，再继续交互。';
+export const SHARED_SESSION_NOTICE = '这个话题还没有连接会话。请在下方选择一个已运行的 HERDR 会话。刚才的消息尚未发送给 Agent，连接后请重新发送；原消息仍保留在话题中。';
+export const SHARED_LAUNCH_NOTICE = '此机器人只连接已有会话，不会另起 Agent。请发送 /adopt 选择已运行的 HERDR 会话，再继续交互。';

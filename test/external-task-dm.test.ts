@@ -1,4 +1,4 @@
-import {test,expect} from 'bun:test';
+import {test,expect} from 'vitest';
 import {isExternalTaskDm} from '../src/im/lark/external-task-dm';
 const env={BOTMUX_EXTERNAL_DM_APP_ID:'app',BOTMUX_EXTERNAL_DM_CHAT_ID:'dm'};
 test('external desktop inbox suppresses only its exact bot and private chat',()=>{

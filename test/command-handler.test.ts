@@ -1,4 +1,3 @@
-import { SharedSessionCreator } from '../src/core/shared-create.js';
 /**
  * Unit tests for command-handler: DAEMON_COMMANDS set and handleCommand routing.
  *
