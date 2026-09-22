@@ -12624,6 +12624,18 @@ async function flushPending(): Promise<void> {
           );
           break;
         }
+        if (blockedBeforeWrite && submissionBackend instanceof HerdrBackend) {
+          // A shared terminal refusal proves no bytes were written. Match the
+          // adopt path: retain the IM message for explicit retry, but do not
+          // install ZMX's sticky recovery hold or replay it automatically.
+          dropFailedBridgeMark(bridgeTurnId, item.dispatchAttempt);
+          inflightInputs.retire(item);
+          send({type:'screen_update',content:renderer?.snapshot().content ?? '',status:'stalled',turnId:item.turnId,dispatchAttempt:item.dispatchAttempt});
+          if (item.turnId) emitTurnTerminal(item.turnId, 'failed', 'herdr_input_not_sent', item.dispatchAttempt, undefined, false);
+          send({type:'user_notify',turnId:item.turnId,dispatchAttempt:item.dispatchAttempt,message:`${err.message} 处理原终端提示后，可发送 /retry 重试本条消息。`});
+          redriveRejectedStructuredReady();
+          break;
+        }
         // Legacy/non-control adapters keep their existing submit-failure path.
         // A durable receiver attempt transfers replay ownership to the
         // receipt/lease reconciler on the ambiguous terminal below, so remove
