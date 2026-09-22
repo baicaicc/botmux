@@ -8138,13 +8138,11 @@ function emitReadyCodexTurns(): void {
     : undefined;
   for (let i = 0; i < ready.length; i++) {
     const turn = ready[i];
-    // A shared App Server session still owns the BotMux remote TUI, so its
-    // Lark-originated turns retain normal send-marker deduplication. Only a
-    // turn synthesized from Codex App input is external/local: that side has
-    // no pending Lark fingerprint and must be forwarded like terminal
-    // `/adopt`, including both the App prompt and its final reply.
+    // Shared App Server and managed CodeBuddy sessions also accept direct
+    // native input. Forward those local turns like `/adopt`, retaining normal
+    // send-marker deduplication for their Lark-originated turns.
     const adoptMode = terminalAdoptMode
-      || (sharedAppServerBridge && turn.isLocal === true);
+      || ((sharedAppServerBridge || lastInitConfig?.cliId === 'codebuddy') && turn.isLocal === true);
     const sourceHermesSessionId = structuredBridgeIsHermes() ? turn.sourceSessionId : undefined;
     const nextBoundaryMs = (i + 1 < ready.length ? ready[i + 1].markTimeMs : nextPendingMarkTimeMs);
     const gateInput = {
@@ -17168,6 +17166,9 @@ async function spawnCli(
       codexBridgeStartTimer();
     }
   } else if (cfg.cliId === 'pi' || cfg.cliId === 'grok' || cfg.cliId === 'codebuddy' || cfg.cliId === 'oh-my-pi' || cfg.cliId === 'ebsd') {
+    // The managed CodeBuddy pane is also directly usable from Web / HERDR.
+    // Reuse adopted-session local-turn collection for those native inputs.
+    if (cfg.cliId === 'codebuddy') codexBridgeQueue.setLocalTurns(true, Date.now());
     // File-backed: pin path when known (pi session id / grok --session-id
     // UUID), else arm the poller. Grok collision-fallback (dir already
     // exists → no --session-id → grok mints id) is recovered via writeInput
