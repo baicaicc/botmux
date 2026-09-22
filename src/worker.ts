@@ -12033,13 +12033,11 @@ function emitReadyCodexTurns(): void {
     : undefined;
   for (let i = 0; i < ready.length; i++) {
     const turn = ready[i];
-    // A shared App Server session still owns the BotMux remote TUI, so its
-    // Lark-originated turns retain normal send-marker deduplication. Only a
-    // turn synthesized from Codex App input is external/local: that side has
-    // no pending Lark fingerprint and must be forwarded like terminal
-    // `/adopt`, including both the App prompt and its final reply.
+    // Shared App Server and managed CodeBuddy sessions also accept direct
+    // native input. Forward those local turns like `/adopt`, retaining normal
+    // send-marker deduplication for their Lark-originated turns.
     const adoptMode = terminalAdoptMode
-      || (sharedAppServerBridge && turn.isLocal === true && !zeroPromptTerminalSync());
+      || ((sharedAppServerBridge || lastInitConfig?.cliId === 'codebuddy') && turn.isLocal === true && !zeroPromptTerminalSync());
     const sourceHermesSessionId = structuredBridgeIs('hermes') ? turn.sourceSessionId : undefined;
     const nextBoundaryMs = (i + 1 < ready.length ? ready[i + 1].markTimeMs : nextPendingMarkTimeMs);
     const gateInput = bridgeGateInputForTurn(sessionId, turn, {
@@ -24686,6 +24684,9 @@ async function spawnCli(
   if (cfg.cliId === 'hermes') {
     hermesBridgeAttach(effectiveResume ? 'baseline-existing' : 'fresh-empty');
   } else if (spawnBridge && codexBridgeFallbackActive()) {
+    // 托管的 CodeBuddy pane 也能从 Web / HERDR 直接使用；原生输入沿用
+    // adopt 会话的 local-turn 采集（fork 自有意图，接入上游 spec 化 spawn）。
+    if (cfg.cliId === 'codebuddy') codexBridgeQueue.setLocalTurns(true, Date.now());
     // File-backed CLIs that declare a spawn policy: codex / traex / cursor /
     // antigravity / pi / oh-my-pi / ebsd / grok. The bridge attaches only
     // when the fallback is actually active for this spawn — antigravity only
