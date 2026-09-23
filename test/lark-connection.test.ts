@@ -64,7 +64,7 @@ describe('startLarkConnection — lifecycle', () => {
       domain: brand === 'lark' ? 'https://open.larksuite.com' : 'https://open.feishu.cn',
       loggerLevel: Lark.LoggerLevel.warn,
       wsConfig: { pingTimeout: 30 },
-      handshakeTimeoutMs: 15_000,
+      handshakeTimeoutMs: 30_000,
     });
     expect(client.start).toHaveBeenCalledExactlyOnceWith({ eventDispatcher });
     expect(intervalMs).toBe(60_000);

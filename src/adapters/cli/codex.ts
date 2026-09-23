@@ -323,6 +323,9 @@ export function createCodexAdapter(pathOverride?: string): CliAdapter {
       const baseArgs = [
         ...(codexProfile ? (codexProfile.startsWith('-') ? [`--profile=${codexProfile}`] : ['--profile', codexProfile]) : []),
         ...(!disableCliBypass ? ['--dangerously-bypass-approvals-and-sandbox'] : []),
+        // Keep bot sessions on the existing restricted path without pausing at
+        // the user's unrelated Codex hook-trust prompt.
+        ...(disableCliBypass ? ['-c', 'features.hooks=false'] : []),
         // Codex 0.14x added a second interactive gate AFTER folder trust: the
         // botmux-installed UserPromptSubmit + Stop hooks in ~/.codex/hooks.json
         // must be manually trusted ("Press t to trust"), and every botmux upgrade
