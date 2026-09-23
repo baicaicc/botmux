@@ -736,6 +736,8 @@ describe('codex buildArgs', () => {
   it('omits approval/sandbox bypass flag when disableCliBypass is true', () => {
     const args = adapter.buildArgs({ hideRateLimitModelNudge: true, sessionId: 'sess-4', resume: false, workingDir: '/repo/root', disableCliBypass: true });
     expect(args).toEqual([
+      '-c',
+      'features.hooks=false',
       '--no-alt-screen',
       '-c',
       'shell_environment_policy.set.BOTMUX_SESSION_ID="sess-4"',
