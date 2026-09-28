@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import {claudeDataDirForPid} from './services/claude-data-dir.js';
 import {codebuddySession,drainCodeBuddyTranscript} from './services/codebuddy-transcript.js';
+import {codebuddyActionPrompt} from './services/codebuddy-action-prompt.js';
 /**
  * Worker process: manages a single CLI PTY session + web terminal.
  * Forked by the daemon, communicates via Node.js IPC.
@@ -13028,6 +13029,8 @@ function startScreenUpdates(): void {
   let lastSentStatus: string | undefined;
   let lastTextSnapshotHash = '';
   let lastContent = '';
+  let lastCodebuddyActionPrompt = '';
+  let lastCodebuddyActionTurnId: string | undefined;
   // PTY-activity watermark of the last tick that actually captured. The screen
   // normally reaches us only through onPtyData (it updates lastPtyActivityAtMs
   // and feeds the renderer in the same place), so when this hasn't advanced the
@@ -13129,6 +13132,24 @@ function startScreenUpdates(): void {
       if (!snapshot) return;
 
       const usageAware = usageLimitTracker.classify(snapshot.content, status);
+      // CodeBuddy's own confirmation UI is otherwise hidden behind Lark's
+      // "show output" toggle. Notify the same turn once per visible picker;
+      // only the bounded question/options leave the terminal, never tool args.
+      if (lastInitConfig?.cliId === 'codebuddy' && currentBotmuxTurnId && status === 'working') {
+        // The filtered stream snapshot can drop a selected "❯ 1. Yes" row as
+        // input echo; the unfiltered viewport retains CodeBuddy's choices.
+        const prompt = codebuddyActionPrompt(lastAnalyzerSnapshot || renderer?.rawSnapshot() || snapshot.content);
+        if (lastCodebuddyActionTurnId !== currentBotmuxTurnId) {
+          lastCodebuddyActionTurnId = currentBotmuxTurnId;
+          lastCodebuddyActionPrompt = '';
+        }
+        if (prompt && prompt !== lastCodebuddyActionPrompt) {
+          lastCodebuddyActionPrompt = prompt;
+          send({type: 'user_notify', message: prompt, turnId: currentBotmuxTurnId, dispatchAttempt: currentBotmuxDispatchAttempt});
+        } else if (!prompt) {
+          lastCodebuddyActionPrompt = '';
+        }
+      }
       if (snapshot.changed || usageAware.status !== lastSentStatus) {
         lastSentStatus = usageAware.status;
         send({
