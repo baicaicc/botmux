@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+
 import { probeCodexProfileCapability, validateCodexProfile, type CodexProfileCapability } from './services/codex-profiles.js';
 import { captureCodexNativeProcesses, waitForCodexNativeRelease } from './core/codex-native-release.js';
 import { freezeCodexCleanupLaunch } from './core/codex-cleanup-launch.js';
@@ -11,6 +12,7 @@ import { supportsTranscriptReplyDeliveryForBot } from './core/reply-delivery.js'
 import { clearBotmuxPromptEnv } from './skills/zero-injection.js';
 import { claudeDataDirForPid } from './services/claude-data-dir.js';
 import { codebuddySession } from './services/codebuddy-transcript.js';
+import { codebuddyActionPrompt } from './services/codebuddy-action-prompt.js';
 /**
  * Worker process: manages a single CLI PTY session + web terminal.
  * Forked by the daemon, communicates via Node.js IPC.
@@ -19048,6 +19050,9 @@ function startScreenUpdates(): void {
   // Last Claude permission dialog already notified (dedup by projection text;
   // cleared when the dialog leaves the screen so the next one notifies again).
   let lastClaudeActionPrompt = '';
+  // CodeBuddy 确认框通知的去重游标（fork 自有）。
+  let lastCodebuddyActionPrompt = '';
+  let lastCodebuddyActionTurnId: string | undefined;
   // PTY-activity watermark of the last tick that actually captured. The screen
   // normally reaches us only through onPtyData (it updates lastPtyActivityAtMs
   // and feeds the renderer in the same place), so when this hasn't advanced the
@@ -19161,6 +19166,7 @@ function startScreenUpdates(): void {
         observeTraexAutoModelCapacity(lastAnalyzerSnapshot || renderer?.rawSnapshot() || snapshot.content);
       }
       const usageAware = usageLimitTracker.classify(snapshot.content, status);
+
       // Claude Code's permission dialogs — including one raised by a
       // background fork agent AFTER the main turn already ended — park the
       // session on a static screen that idle detection reports as "ready for
@@ -19190,6 +19196,24 @@ function startScreenUpdates(): void {
       // leave the card at its starting state until the first write happens.
       if (startupInputHeld()) return;
       if (snapshot.changed || usageAware.status !== lastSentStatus || backgroundWaitTasks !== lastSentBackgroundWait) {
+      // CodeBuddy's own confirmation UI is otherwise hidden behind Lark's
+      // "show output" toggle. Notify the same turn once per visible picker;
+      // only the bounded question/options leave the terminal, never tool args.
+      if (lastInitConfig?.cliId === 'codebuddy' && currentBotmuxTurnId && status === 'working') {
+        // The filtered stream snapshot can drop a selected "❯ 1. Yes" row as
+        // input echo; the unfiltered viewport retains CodeBuddy's choices.
+        const prompt = codebuddyActionPrompt(lastAnalyzerSnapshot || renderer?.rawSnapshot() || snapshot.content);
+        if (lastCodebuddyActionTurnId !== currentBotmuxTurnId) {
+          lastCodebuddyActionTurnId = currentBotmuxTurnId;
+          lastCodebuddyActionPrompt = '';
+        }
+        if (prompt && prompt !== lastCodebuddyActionPrompt) {
+          lastCodebuddyActionPrompt = prompt;
+          send({type: 'user_notify', message: prompt, turnId: currentBotmuxTurnId, dispatchAttempt: currentBotmuxDispatchAttempt});
+        } else if (!prompt) {
+          lastCodebuddyActionPrompt = '';
+        }
+      }
         lastSentStatus = usageAware.status;
         lastSentBackgroundWait = backgroundWaitTasks;
         send({
