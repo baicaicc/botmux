@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   decodeTerminalWriteFrame,
   terminalWriteFrame,
@@ -90,6 +90,53 @@ describe('worker 终端页与工作台的跨文件契约', () => {
     const worker = readFileSync(join(process.cwd(), 'src/worker.ts'), 'utf8');
     expect(worker).toMatch(/\bvar wsHasWrite\b/);
     expect(worker).toContain(`'${WORKBENCH_TERM_WRITE_MESSAGE}'`);
+describe('worker 终端页的跨文件接缝', () => {
+  const worker = readFileSync(join(process.cwd(), 'src/worker.ts'), 'utf8');
+
+  it('握手完成后发的是带外控制帧，不再往 PTY 流里塞 OSC 写权限', () => {
+    expect(worker).toContain('terminalWriteFrame(hasWrite)');
+    expect(worker).not.toContain(']1989;write;');
+  });
+
+  it('终端页嵌的是同一份解码器，且只在首帧上用', () => {
+    expect(worker).toContain('decodeTerminalWriteFrameSource');
+    expect(worker).toContain('_wbFirstFrame');
+  });
+
+  it('每次重连先把写权限退回未知', () => {
+    expect(worker).toContain('_wbSetWsWrite(null)');
+  });
+
+  it('ws.onclose 当下就把写权限退回未知并上抛（重连中不再停留在旧判定）', () => {
+    // 关闭那一刻就 reset，不能等 2 秒后的 connect() 才退回未知：否则断线到重连的
+    // 空窗里，终端页仍以上一条连接的 wsHasWrite 放行输入，父页也还显示旧的可写判定。
+    const at = worker.search(/ws\.onclose=function\([^)]*\)\{/);
+    expect(at, 'worker.ts 里应有 ws.onclose 处理器').toBeGreaterThan(-1);
+    const body = worker.slice(at, worker.indexOf('}', at) + 1);
+    expect(body).toContain('_wbSetWsWrite(null)');
+    // 且必须等新连接的新首帧才恢复——onclose 先把首帧标志复位。
+    expect(body).toContain('_wbFirstFrame=true');
+  });
+
+  it('原生连接失败显示原因并停止重连；普通网络断开继续重连', () => {
+    const start = worker.indexOf('ws.onclose=') + 'ws.onclose='.length;
+    const end = worker.indexOf('\n  };', start) + '\n  }'.length;
+    const handler = worker.slice(start, end).replace('${HERDR_WEB_CONTROL_FAILED}', '4409');
+    const invoke = new Function('event', 'el', '_wbSetWsWrite', 'setTimeout', 'connect',
+      `var ws_={},_wbFirstFrame=false,_wbHideBytes=()=>{};(${handler})(event);return {ws_,_wbFirstFrame};`);
+    const el = {textContent: '', className: '', title: ''};
+    const write = vi.fn(), timeout = vi.fn(), connect = vi.fn();
+    expect(invoke({code: 4409, reason: '操作权被占用'}, el, write, timeout, connect))
+      .toEqual({ws_: null, _wbFirstFrame: true});
+    expect(el.textContent).toBe('操作权被占用'); expect(write).toHaveBeenCalledWith(null);
+    expect(timeout).not.toHaveBeenCalled();
+    invoke({code: 1006, reason: ''}, el, write, timeout, connect);
+    expect(timeout).toHaveBeenCalledWith(connect, 2000);
+  });
+
+  it('页面仍然导出 wsHasWrite 全局并按同一个消息类型上抛', () => {
+    expect(worker).toContain('var wsHasWrite=null');
+    expect(worker).toContain("'botmux:wb-terminal-write'");
   });
 });
 
