@@ -38,6 +38,7 @@ export class HerdrSharedInput {
     return JSON.stringify({terminal:this.terminalId,cwd:pane.cwd,identities,nativeSessionId});
   }
   pin():number|undefined {this.source=this.inspect();return this.codebuddyPid;}
+  getTerminalId():string {this.verify();return this.terminalId;}
   verify():void {if(this.inspect()!==this.source)throw new Error('原 Agent 身份已变化。');}
   private refusal(message:string,screen?:string):Error {
     if(!this.codebuddyPid)return new Error(message);

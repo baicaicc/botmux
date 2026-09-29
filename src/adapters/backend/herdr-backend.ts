@@ -1,4 +1,5 @@
 import {HerdrSharedInput} from './herdr-shared-input.js';
+import type {HerdrWebTarget} from '../../utils/herdr-web-stream.js';
 import {codebuddySession} from '../../services/codebuddy-transcript.js';
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -626,6 +627,15 @@ export class HerdrBackend implements SessionBackend {
 
   private sharedInput?: HerdrSharedInput;
   private sharedBoundary?: HerdrSharedInput;
+
+  sharedWebTarget(): HerdrWebTarget | undefined {
+    const boundary = this.sharedBoundary;
+    if (!boundary) return;
+    return {session: this.sessionName, terminalId: boundary.getTerminalId(), verify: () => {
+      if (this.exited || this.sharedBoundary !== boundary) throw new Error('原共享会话已变化。');
+      boundary.verify();
+    }};
+  }
 
   async acquireSharedInput(): Promise<(() => Promise<void>) | undefined> {
     if(!this.sharedBoundary)return;

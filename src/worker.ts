@@ -253,6 +253,7 @@ import { createServer as createNetServer, type Server as NetServer, type Socket 
 import { WebSocketServer, WebSocket } from 'ws';
 import { listenWebTerminalWithFallback } from './utils/web-terminal-listen.js';
 import { HerdrWebTerminalBinding } from './utils/herdr-web-terminal-binding.js';
+import { connectHerdrWebStream, HERDR_WEB_CONTROL_FAILED } from './utils/herdr-web-stream.js';
 import { TERMINAL_FAVICON_DATA_URI } from './utils/terminal-favicon.js';
 import type {
   CodexAppDispatchLedgerEntry,
@@ -2105,6 +2106,7 @@ let isZellijMode = false;
 let httpServer: ReturnType<typeof createHttpServer> | null = null;
 let wss: WebSocketServer | null = null;
 const wsClients = new Set<WebSocket>();
+const sharedHerdrWsClients = new Set<WebSocket>();
 const authedClients = new WeakSet<WebSocket>();
 /** Per-WS-client tmux/zellij attach PTYs. */
 const clientPtys = new Map<WebSocket, pty.IPty>();
@@ -2355,7 +2357,7 @@ function codexUpgradeBlocked(): string | undefined {
       || hasStructuredLifecycleBlock()) return 'waiting for the current turn and input queues';
   // Web terminal writes can bypass normal input queues. Never replace a CLI
   // while a terminal client is attached, including during a pending handshake.
-  if (wsClients.size || clientPtys.size) return 'a Web Terminal is attached';
+  if (wsClients.size || sharedHerdrWsClients.size || clientPtys.size) return 'a Web Terminal is attached';
   return codexUpgradeInspectionBlock;
 }
 
@@ -18258,6 +18260,28 @@ function startWebServer(host: string, preferredPort?: number): Promise<number> {
         ws.close(4003, 'authorization expired');
         return;
       }
+      // A shared native Agent needs its own HERDR controller per browser.
+      // Keep these sockets out of snapshot broadcasts, especially while their
+      // native lease is pending: the first frame must be the write verdict.
+      if (backend instanceof HerdrBackend) {
+        const source = backend;
+        try {
+          const target = source.sharedWebTarget();
+          if (target) {
+            sharedHerdrWsClients.add(ws);
+            ws.once('close', () => sharedHerdrWsClients.delete(ws));
+            connectHerdrWebStream(ws, {...target, verify: () => {
+              if (backend !== source) throw new Error('原后端已变化。');
+              target.verify();
+            }}, {write: hasWrite, expiresAt: controlExpiresAt, audit: data => auditTerminalInput(auditUser, data)});
+            log(`Native HERDR web stream requested (write: ${hasWrite})`);
+            return;
+          }
+        } catch {
+          ws.close(HERDR_WEB_CONTROL_FAILED, '原 Agent 身份无法核验；请重新打开页面。');
+          return;
+        }
+      }
       wsClients.add(ws);
       const allowReadOnlyRemoteScroll = canHandleReadOnlyRemoteScroll();
       if (hasWrite) authedClients.add(ws);
@@ -19345,13 +19369,16 @@ if(typeof ResizeObserver!=='undefined'){
     if(m){try{_clipBuf=new TextDecoder().decode(Uint8Array.from(atob(m[1]),function(c){return c.charCodeAt(0)}));_doCopy(_clipBuf);_showCopied()}catch(ex){}}
     term.write(data,_settleInitialBottom);
   };
-  ws.onclose=function(){
+  ws.onclose=function(e){
     ws_=null;el.textContent='disconnected';el.className='err';
     // 关闭当下就把这条连接的写权限退回未知：先复位首帧标志（重连后要等新首帧才恢复
     // 结论），再 _wbSetWsWrite(null) —— 它同时收起输入（term.onData/toolbar/_fwdScroll
     // 的门禁都以 wsHasWrite===true 为准）并向嵌入方上抛 write:null。不这样做的话，断线
     // 到 2 秒后重连的空窗里，页面仍以上一条连接的旧判定放行输入、父页也还显示旧的可写。
     _wbFirstFrame=true;_wbSetWsWrite(null);
+    if(e.code===${HERDR_WEB_CONTROL_FAILED}){
+      el.textContent=e.reason||'原终端连接不可用；请重新打开页面。';el.title=el.textContent;return;
+    }
     setTimeout(connect,2000);
   };
   ws.onerror=function(){ws.close()};
@@ -21893,6 +21920,8 @@ function cleanup(): void {
   clientPtys.clear();
   for (const ws of wsClients) ws.close();
   wsClients.clear();
+  for (const ws of sharedHerdrWsClients) ws.close();
+  sharedHerdrWsClients.clear();
   herdrWebBindings.clear();
   if (wss) { wss.close(); wss = null; }
   if (httpServer) { httpServer.close(); httpServer = null; }
