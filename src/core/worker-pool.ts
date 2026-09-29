@@ -2890,6 +2890,9 @@ function storedSessionCliDisplayName(ds: DaemonSession): string {
  */
 function recordLaunchModel(ds: DaemonSession, model: string | undefined): void {
   if (ds.spawnModelOverride) return;
+  // A KLL profile is a selection token, not the model displayed by the CLI.
+  // A reattach never launches or resolves again, so keep the actual model.
+  if (model && model === ds.session.kllProfileId) return;
   if (ds.session.model === model) return;
   ds.session.model = model;   // undefined clears a stale record
   sessionStore.updateSession(ds.session);
@@ -2907,7 +2910,7 @@ function sessionServiceTier(ds: DaemonSession, cliId: CliId): CodexServiceTier |
 
 function sessionAgentConfig(
   ds: DaemonSession,
-  botCfg: { cliId: CliId; cliRuntime?: CliRuntimeConfig; cliPathOverride?: string; cliConfigDir?: string; wrapperCli?: string; cliLaunchMode?: CliLaunchMode; model?: string; traexAutoModel?: TraexAutoModelConfig; modelBackendVariant?: 'standard' | 'max'; reasoningEffort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra'; launchShell?: string; startupCommands?: string[]; env?: Record<string, string>; backendType?: string; riff?: unknown; codexRpcInput?: boolean },
+  botCfg: { cliId: CliId; kll?: import('../services/kll-launch.js').KllConfig; cliRuntime?: CliRuntimeConfig; cliPathOverride?: string; cliConfigDir?: string; wrapperCli?: string; cliLaunchMode?: CliLaunchMode; model?: string; traexAutoModel?: TraexAutoModelConfig; modelBackendVariant?: 'standard' | 'max'; reasoningEffort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra'; launchShell?: string; startupCommands?: string[]; env?: Record<string, string>; backendType?: string; riff?: unknown; codexRpcInput?: boolean },
 ): { codexProfile?: string; codexProfileHome?: string; cliId: CliId; cliRuntime?: CliRuntimeSnapshot; cliPathOverride?: string; cliConfigDir?: string; wrapperCli?: string; cliLaunchMode?: CliLaunchMode; model?: string; traexAutoModel?: TraexAutoModelConfig; modelBackendVariant?: 'standard' | 'max'; reasoningEffort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra'; serviceTier?: CodexServiceTier; launchShell?: string; startupCommands?: string[] } {
   const selected = ds.session.cliLaunchSnapshot;
   const groupEffort = resolveSessionGroupSettings(ds, selected?.cliId ?? ds.session.cliId ?? botCfg.cliId).reasoningEffort;
@@ -14931,6 +14934,7 @@ export function forkWorker(
       cliPathOverride: agentCfg.cliPathOverride,
     })),
     wrapperCli: agentCfg.wrapperCli,
+    kll: agentCfg.cliId === botCfg.cliId ? botCfg.kll : undefined,
     cliLaunchMode: agentCfg.cliLaunchMode,
     launchShell: agentCfg.launchShell,
     model: agentCfg.model,
@@ -16193,6 +16197,15 @@ function setupWorkerHandlers(
           await releaseReservation(0);
         };
         await persistActivationAck(0);
+        break;
+      }
+
+      case 'kll_model_selected': {
+        if (!ownsLifecycleMutation()) break;
+        if (ds.spawnModelOverride) break; // preserve the existing one-shot override contract
+        ds.session.kllProfileId = msg.profileId;
+        ds.session.model = msg.model;
+        sessionStore.updateSession(ds.session);
         break;
       }
 

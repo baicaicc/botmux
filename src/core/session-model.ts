@@ -69,7 +69,7 @@ export function resolveSessionLaunchModelChoice(
     } else {
       const sessionCliId = ds.session.cliId;
       const cliMatchesBot = !sessionCliId || !botCfg.cliId || sessionCliId === botCfg.cliId;
-      logicalModel = cliMatchesBot ? botCfg.model : ds.session.model;
+      logicalModel = cliMatchesBot ? (botCfg.model ?? (botCfg.kll ? ds.session.kllProfileId : undefined)) : ds.session.model;
     }
   }
 

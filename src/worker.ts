@@ -185,6 +185,7 @@ import { botInjectedEnv, buildSessionChildEnv } from './core/env-policy.js';
 import { envPolicyRequiresColdStart, readEnvPolicyStamp, writeEnvPolicyStamp } from './services/env-policy-stamp.js';
 import { writeSessionEnvStamp } from './services/session-env-stamp.js';
 import { cliModelSupportsReasoningEffort } from './services/codex-reasoning-effort.js';
+import { resolveKllLaunch, validateKllLaunch, validateKllExtraArgs } from './services/kll-launch.js';
 import { normalizeExistingAppServerEndpoint } from './core/existing-app-server.js';
 import { resolveChildBotsConfig } from './core/config-dir.js';
 import {
@@ -2907,6 +2908,8 @@ let lastInitConfig: Extract<DaemonToWorker, { type: 'init' }> | null = null;
 let traexAutoModelController: TraexAutoModelController | null = null;
 let traexAutoModelSwitching = false;
 let traexAutoModelTurnReplayForbidden = false;
+// KLL（fork 自有）：上次共享 KLL 选择的 profile，作为后续 spawn 的缺省选择。
+let kllSelectedProfileId: string | undefined;
 
 /** 本会话最终回复的投递方式。daemon 在 init 上冻结（core/reply-delivery.ts），
  *  抑制闸据此判断 final 是「兜底」还是「投递通道」。读不到一律 'send'——
@@ -19880,6 +19883,8 @@ async function spawnCli(
   if (networkError) throw new Error(networkError);
   const proxyError = networkProxyError(cfg.sandboxNetworkPolicy, { ...process.env, ...cfg.env });
   if (proxyError) throw new Error(proxyError);
+  // KLL（fork 自有）：本地 KLL 选择器在启动 CLI 前完成校验。
+  validateKllLaunch(cfg);
   const spawnGeneration = ++cliSpawnGeneration;
   const spawnStartedAtMs = Date.now();
   restartInterruptionScanBeforeMs = undefined;
@@ -20185,6 +20190,10 @@ async function spawnCli(
   // Re-verify capability once effectiveCliId (e.g. dsh-tui) and cliPathOverride are resolved into cliAdapter.
   if (cliAdapter.supportsProgramStatus && !programStatusStream) {
     programStatusStream = new ProgramStatusFramingStream();
+  }
+  // KLL（fork 自有）：codebuddy 的本地 KLL 选择器需以真实解析出的 CLI 路径校验。
+  if (cfg.kll && cfg.cliId === 'codebuddy') {
+    validateKllLaunch({ ...cfg, cliPathOverride: realpathSync(cliAdapter.resolvedBin) });
   }
   const cardActionCapabilities = pluginCardActionCapabilitiesEnv(cfg);
   // backendType trust-but-verify + HARD GATE (PTY 退役): an explicit per-bot
@@ -21619,6 +21628,21 @@ async function spawnCli(
     writeCredentialSourceStamp(config.session.dataDir, cfg.sessionId, credentialSourceDir);
   }
 
+  // Select once before adapter settings/argv are built. Reattachment keeps the
+  // already-running CLI. Restarts reuse the selected model, never tier-fail over.
+  if (cfg.kll && !willReattachPersistent && effectiveBackendType === 'herdr') {
+    HerdrBackend.assertProtectedEnvironmentLaunch();
+  }
+  const kllLaunch = resolveKllLaunch(cfg, {
+    reattach: willReattachPersistent,
+    selectedProfileId: kllSelectedProfileId,
+  });
+  if (kllLaunch) {
+    kllSelectedProfileId = kllLaunch.profileId;
+    cfg = { ...cfg, model: kllLaunch.model, env: kllLaunch.env };
+    send({ type: 'kll_model_selected', profileId: kllLaunch.profileId, model: kllLaunch.model });
+  }
+
   // The worker establishes trust before any runner output can be parsed. A
   // fresh runner gets a new capability; a persistent reattach reloads the
   // capability created by that same runner generation.
@@ -22064,7 +22088,9 @@ async function spawnCli(
       if (sandboxRequested) {
         try { canonDir = realpathSync(settingsDir); } catch { /* 目录可能尚未创建，保留 lexical */ }
       }
-      perBotSettingsFilePath = join(canonDir, 'botmux-launch-settings.json');
+      perBotSettingsFilePath = join(canonDir, kllLaunch
+        ? `botmux-kll-${createHash('sha256').update(cfg.sessionId).digest('hex').slice(0, 16)}.json`
+        : 'botmux-launch-settings.json');
 
     }
   }
@@ -22186,6 +22212,14 @@ async function spawnCli(
       ? nativeSubagentRuntimeHookCommand()
       : undefined,
   });
+  if (kllLaunch && cliAdapter.claudeDataDir) {
+    // A missing --settings would allow user/project provider settings to win.
+    // The ordinary adapter keeps its historical fallback; KLL must fail closed.
+    if (!perBotSettingsFilePath || !args.includes(perBotSettingsFilePath)) {
+      throw new Error('KLL requires protected Claude launch settings; the native CLI was not started');
+    }
+    chmodSync(perBotSettingsFilePath, 0o600);
+  }
   // Pi's deferred long-first-prompt command is implemented by a session-scoped
   // extension. Keep its launch args across owned process restarts while the
   // queued/in-flight command may still need replay.
@@ -22197,6 +22231,8 @@ async function spawnCli(
   if (cliAdapter.allowExtraArgs === false && (process.env.CLI_EXTRA_ARGS ?? '').trim()) {
     log(`Ignoring CLI_EXTRA_ARGS for fixed-contract adapter ${cliAdapter.id}`);
   }
+  // KLL（fork 自有）：本地选择器激活时禁止 CLI_EXTRA_ARGS 覆盖模型/设置。
+  if (kllLaunch) validateKllExtraArgs(cfg, cliExtraArgs);
   if (cliExtraArgs.length) args.push(...cliExtraArgs);
 
   // Claude Code 在 root/sudo 下会拒绝 --dangerously-skip-permissions 并立即 exit。
@@ -22577,6 +22613,8 @@ async function spawnCli(
   // merged into childEnv) so the tmux/zellij backends inject it via the per-pane
   // `/usr/bin/env` prefix and never into the shared backing-server global env,
   // keeping it from leaking across bots. Re-sanitized early before buildArgs.
+  // KLL（fork 自有）：本地选择器的 removeEnv 作用于 childEnv，剥离其不允许的继承项。
+  for (const key of kllLaunch?.removeEnv ?? []) delete childEnv[key];
   if (cliAdapter.id === 'kimi' && cfg.reasoningEffort
       && cliModelSupportsReasoningEffort('kimi', cfg.model, cfg.reasoningEffort)) {
     // 复用逐会话 env 注入，避免污染共享 tmux server 或修改 Kimi 全局配置。
@@ -28670,6 +28708,7 @@ process.on('message', async (raw: unknown) => {
           break;
         }
       }
+      validateKllLaunch(msg);
       lastInitConfig = msg;
       configureTraexAutoModel(msg);
       if (isCodexAppCliId(msg.cliId) && msg.noProgressNotify?.timeoutMs !== undefined) {

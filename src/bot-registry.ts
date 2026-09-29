@@ -57,6 +57,7 @@ import { botEnvLayer } from './core/session-env.js';
 import { normalizeDispatchLaunchPolicy } from './core/dispatch-launch-contract.js';
 import { normalizeEnvPolicy, type EnvPolicy } from './core/env-policy.js';
 import { normalizeCredentialsSourceDir } from './services/cli-credential-source.js';
+import { normalizeKllConfig, validateKllLaunch, type KllConfig } from './services/kll-launch.js';
 import { resolveBotmuxConfigDir, resolveBotsConfigFile, type BotsConfigProvenance } from './core/config-dir.js';
 import { normalizeSubstituteMode } from './services/substitute-mode-normalize.js';
 import { normalizeCommandTriggers } from './services/command-trigger-normalize.js';
@@ -1545,6 +1546,8 @@ export interface BotConfig {
    * `aiden x claude` 时自动剥掉 aiden 拒收的 --settings。见 src/setup/cli-selection.ts。
    */
   wrapperCli?: string;
+  /** Resolve shared KLL resources before a native CLI launch; omitted means direct. */
+  kll?: KllConfig;
   /** Special launch mode layered above the adapter; currently Forge x TraeX. */
   cliLaunchMode?: CliLaunchMode;
   /**
@@ -4120,6 +4123,7 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
       wrapperCli: typeof entry.wrapperCli === 'string' && entry.wrapperCli.trim()
         ? entry.wrapperCli.trim()
         : undefined,
+      kll: normalizeKllConfig(entry.kll),
       cliLaunchMode,
       launchShell: typeof entry.launchShell === 'string' && entry.launchShell.trim()
         ? entry.launchShell.trim()
@@ -4419,6 +4423,7 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
           ? 'valid'
           : 'invalid';
     parsedNativeSubagentRuntimeStatus.set(config, nativeSubagentRuntimeStatus);
+    validateKllLaunch(config);
     configs.push(config);
   }
   validateCodexInstanceRoster(configs);

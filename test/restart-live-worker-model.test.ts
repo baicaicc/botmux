@@ -44,6 +44,20 @@ import {
 } from '../src/core/worker-pool.js';
 import { resolveSessionLaunchModel } from '../src/core/session-model.js';
 
+const workerSource = readFileSync(new URL('../src/worker.ts', import.meta.url), 'utf8');
+const workerPoolSource = readFileSync(new URL('../src/core/worker-pool.ts', import.meta.url), 'utf8');
+const dashboardIpcSource = readFileSync(new URL('../src/core/dashboard-ipc-server.ts', import.meta.url), 'utf8');
+const daemonSource = readFileSync(new URL('../src/daemon.ts', import.meta.url), 'utf8');
+
+describe('KLL route resume metadata', () => {
+  it('passes the exact profile on restart while retaining the actual displayed model', () => {
+    getBotMock.mockReturnValue({ config: { cliId: 'claude-code', kll: { tier: 'strong' } } });
+    const ds: any = { larkAppId: 'kll-test', session: { cliId: 'claude-code', model: 'glm-5.3', kllProfileId: 'profile-glm' } };
+    expect(latestModelForRespawn(ds)).toBe('profile-glm');
+    expect(ds.session.model).toBe('glm-5.3');
+  });
+});
+
 let sessionCounter = 0;
 
 function makeDs(session: Record<string, unknown> = {}, dsExtra: Record<string, unknown> = {}) {
