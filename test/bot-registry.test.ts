@@ -66,6 +66,19 @@ function makeCfg(overrides: Record<string, unknown> = {}) {
   };
 }
 
+describe('KLL bot configuration', () => {
+  it('loads an explicit local selector and leaves direct bots unchanged', async () => {
+    const mod = await freshImport();
+    const [direct] = mod.parseBotConfigsFromText(JSON.stringify([makeCfg()]));
+    expect(direct.kll).toBeUndefined();
+    const [selected] = mod.parseBotConfigsFromText(JSON.stringify([makeCfg({ kll: { tier: 'high', executable: '/local/kll' } })]));
+    expect(selected.kll).toEqual({ tier: 'high', executable: '/local/kll' });
+    expect(selected.cliId).toBe('claude-code');
+    expect(() => mod.parseBotConfigsFromText(JSON.stringify([makeCfg({ kll: {}, wrapperCli: 'aiden x claude' })]))).toThrow('local interactive CLI');
+    expect(() => mod.parseBotConfigsFromText(JSON.stringify([makeCfg({ kll: { tier: 's' } })]))).toThrow('kll.tier');
+  });
+});
+
 // ─── registerBot ──────────────────────────────────────────────────────────
 
 describe('registerBot', () => {

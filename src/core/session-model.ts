@@ -6,6 +6,7 @@ export type LaunchModelSession = {
   session: {
     cliId?: CliId;
     model?: string;
+    kllProfileId?: string;
     groupDefaultModels?: GroupDefaultModels;
     scope?: 'thread' | 'chat';
     chatType?: 'group' | 'p2p';
@@ -22,7 +23,7 @@ export function resolveSessionGroupSettings(ds: LaunchModelSession, cliId: strin
 }
 
 /** Minimal shape of the live bot config needed to resolve a launch model. */
-export type LaunchModelBotConfig = { cliId?: CliId; model?: string };
+export type LaunchModelBotConfig = { cliId?: CliId; model?: string; kll?: import('../services/kll-launch.js').KllConfig };
 
 /**
  * The model botmux passes to the CLI for a given session's next spawn.
@@ -69,5 +70,7 @@ export function resolveSessionLaunchModel(
   if (!botCfg) return ds.session.model;
   const sessionCliId = ds.session.cliId;
   const cliMatchesBot = !sessionCliId || !botCfg.cliId || sessionCliId === botCfg.cliId;
-  return cliMatchesBot ? botCfg.model : ds.session.model;
+  return cliMatchesBot
+    ? botCfg.model ?? (botCfg.kll ? ds.session.kllProfileId : undefined)
+    : ds.session.model;
 }

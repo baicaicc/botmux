@@ -188,7 +188,8 @@ function environmentForPaneAgent(bin: string, childEnv: Record<string, string> |
   const env = { ...(childEnv ?? {}) };
   if (basename(bin) === 'codebuddy') {
     for (const key of Object.keys(env)) {
-      if (key.startsWith('CODEBUDDY_') || key.startsWith('CODEX_') || key === 'CLAUDECODE' || key === 'CLAUDE_CODE_SESSION_ID') delete env[key];
+      if ((key.startsWith('CODEBUDDY_') && !['CODEBUDDY_API_KEY', 'CODEBUDDY_BASE_URL', 'CODEBUDDY_MODEL'].includes(key))
+          || key.startsWith('CODEX_') || key === 'CLAUDECODE' || key === 'CLAUDE_CODE_SESSION_ID') delete env[key];
     }
     env.TERM_PROGRAM = 'herdr';
     delete env.TERM_PROGRAM_VERSION;
@@ -210,7 +211,7 @@ function shellSingleQuote(value: string): string {
  *
  * Run this script by absolute path so interactive shell rc files cannot
  * shadow it by prepending real CLI directories to PATH. The mode-0700 script
- * restores the launch PATH and execs the full command, including wrappers and
+ * restores the launch environment and execs the full command, including wrappers and
  * multiline prompts. It removes itself before exec; the backend also cleans
  * up when automatic agent detection succeeds or any launch step fails.
  */
@@ -218,23 +219,30 @@ function createPaneAgentLauncher(
   canonicalExecutable: string,
   bin: string,
   args: string[],
-  originalPath: string,
+  environment: Record<string, string>,
 ): { dir: string; path: string } {
   const dir = mkdtempSync(join(tmpdir(), 'botmux-herdr-launch-'));
   const path = join(dir, canonicalExecutable);
-  const command = [bin, ...args].map(shellSingleQuote).join(' ');
-  writeFileSync(path, [
-    '#!/bin/sh',
-    // Minimise the lifetime of the mode-0700 file containing the exact argv.
-    // The backend's finally block is the fallback if Herdr never executes it.
-    '/bin/rm -f -- "$0"',
-    '/bin/rmdir -- "${0%/*}" 2>/dev/null || true',
-    `PATH=${shellSingleQuote(originalPath)}`,
-    'export PATH',
-    `exec ${command}`,
-    '',
-  ].join('\n'), { mode: 0o700 });
-  return { dir, path };
+  try {
+    const command = [bin, ...args].map(shellSingleQuote).join(' ');
+    writeFileSync(path, [
+      '#!/bin/sh',
+      // Credentials live only in this private file and the child environment.
+      // The backend's finally block is the fallback if Herdr never executes it.
+      '/bin/rm -f -- "$0"',
+      '/bin/rmdir -- "${0%/*}" 2>/dev/null || true',
+      ...Object.entries(environment).map(([key, value]) => {
+        if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) throw new Error('Invalid Herdr launch environment key');
+        return `export ${key}=${shellSingleQuote(value)}`;
+      }),
+      `exec ${command}`,
+      '',
+    ].join('\n'), { mode: 0o700 });
+    return { dir, path };
+  } catch (error) {
+    rmSync(dir, { recursive: true, force: true });
+    throw error;
+  }
 }
 
 function envCommandArgs(env: Record<string, string>): string[] {
@@ -341,6 +349,13 @@ function longestSuffixPrefix(previous: string, next: string): number {
 }
 
 export class HerdrBackend implements SessionBackend {
+  /** Legacy agent start passes shared-pane environment values in argv. */
+  static assertProtectedEnvironmentLaunch(): void {
+    if (!herdrUsesManagedAgentFacade()) {
+      throw new Error('KLL requires Herdr >=0.7.5 for a protected launch environment');
+    }
+  }
+
   private serverProcess: ChildProcess | null = null;
   private pollTimer: NodeJS.Timeout | null = null;
   private statusWaitProcesses: ChildProcess[] = [];
@@ -838,7 +853,6 @@ export class HerdrBackend implements SessionBackend {
       );
     }
     const workspaceEnv = environmentForPaneAgent(cliBin, this.childEnv);
-    const originalPath = workspaceEnv.PATH ?? process.env.PATH ?? '';
     let workspaceId: string | undefined;
     let launcher: ReturnType<typeof createPaneAgentLauncher> | undefined;
     try {
@@ -849,7 +863,6 @@ export class HerdrBackend implements SessionBackend {
           '--cwd', opts.cwd,
           '--label', this.agentName,
           '--no-focus',
-          ...envCommandArgs(workspaceEnv),
         ]),
         { timeout: 10_000, env: this.childEnv },
       );
@@ -859,7 +872,7 @@ export class HerdrBackend implements SessionBackend {
         throw new Error(`herdr workspace create for ${this.agentName} in ${this.sessionName} failed: missing root pane`);
       }
 
-      launcher = createPaneAgentLauncher(basename(cliBin), bin, args, originalPath);
+      launcher = createPaneAgentLauncher(basename(cliBin), bin, args, workspaceEnv);
       requiredJsonCommand(
         `herdr pane run ${paneId} in ${this.sessionName}`,
         // One quoted COMMAND argument reaches the shell verbatim, even while

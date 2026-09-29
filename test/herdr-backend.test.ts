@@ -200,6 +200,17 @@ afterEach(() => {
 // ─── Backend connection surface ────────────────────────────────────────────
 
 describe('HerdrBackend connection surface', () => {
+  it.each(['herdr 0.7.4\n', 'herdr 0.6.6\n', 'unknown'])('rejects legacy environment-in-argv launch for KLL: %s', version => {
+    mockedExecFileSync.mockImplementation((() => version) as any);
+    expect(() => HerdrBackend.assertProtectedEnvironmentLaunch()).toThrow('Herdr >=0.7.5');
+    expect(mockedExecFileSync.mock.calls.every(call => (call[1] as string[]).includes('--version'))).toBe(true);
+  });
+  it('accepts protected managed-pane launch for KLL and refuses an unavailable version probe', () => {
+    mockedExecFileSync.mockImplementation((() => 'herdr 0.7.5\n') as any);
+    expect(() => HerdrBackend.assertProtectedEnvironmentLaunch()).not.toThrow();
+    mockedExecFileSync.mockImplementation((() => { throw new Error('ENOENT'); }) as any);
+    expect(() => HerdrBackend.assertProtectedEnvironmentLaunch()).toThrow('Herdr >=0.7.5');
+  });
   it('isAvailable() returns true when `herdr --version` succeeds', () => {
     mockedExecFileSync.mockImplementation((() => 'herdr 1.0\n') as any);
     expect(HerdrBackend.isAvailable()).toBe(true);
@@ -371,6 +382,21 @@ describe('HerdrBackend connection surface', () => {
 // ─── spawn(): fresh / existing / external ──────────────────────────────────
 
 describe('HerdrBackend.spawn', () => {
+  it('keeps provider secrets out of Herdr argv and quotes the private launcher environment', () => {
+    const captured = setManagedLaunchResponses('claude');
+    const secret = "token'\n$(touch /tmp/must-not-run)`whoami`";
+    const be = new HerdrBackend(SESSION);
+    try {
+      be.spawn('/native/claude', ['--session-id', 'sid-1'], {
+        cwd: '/work', cols: 120, rows: 30, env: { PATH: '/usr/bin:/bin' },
+        injectEnv: { ANTHROPIC_API_KEY: secret },
+      });
+      expect(captured.launcherMode).toBe(0o700);
+      expect(captured.launcherScript).toContain("export ANTHROPIC_API_KEY='token'\"'\"'\n$(touch /tmp/must-not-run)`whoami`'");
+      expect(mockedExecFileSync.mock.calls.flatMap(call => call[1] ?? []).join(' ')).not.toContain(secret);
+      expect(herdrCall('workspace', 'create')).not.toContain('--env');
+    } finally { be.kill(); }
+  });
   it('launches native CodeBuddy with its own verified identity and releases only the viewer', () => {
     const nativeId = '00000000-0000-4000-8000-000000000001';
     vi.mocked(codebuddySession).mockReturnValue({sessionId:nativeId,cwd:'/work'});
@@ -390,8 +416,10 @@ describe('HerdrBackend.spawn', () => {
       expect(captured.launcherScript).toContain("'--model' 'hy3'");
       const env = herdrCall('workspace','create')!.join(' ');
       expect(env).not.toContain('parent-only');
-      expect(env).toContain('TERM_PROGRAM=herdr');
-      expect(env).toContain('HTTP_PROXY=http://localhost:7899');
+      expect(captured.launcherScript).toContain("export TERM_PROGRAM='herdr'");
+      expect(captured.launcherScript).toContain("export HTTP_PROXY='http://localhost:7899'");
+      expect(captured.launcherScript).toContain("export CODEBUDDY_API_KEY='parent-only'");
+      expect(captured.launcherScript).not.toContain('CODEX_THREAD_ID');
       expect(be.getChildPid()).toBe(42);
     } finally {be.kill();vi.mocked(codebuddySession).mockReset();}
     expect(herdrCall('workspace','close')).toBeUndefined();
@@ -428,14 +456,12 @@ describe('HerdrBackend.spawn', () => {
     expect(herdrCall('workspace', 'create')).toEqual([
       '--session', SESSION, 'workspace', 'create',
       '--cwd', '/work', '--label', 'botmux', '--no-focus',
-      '--env', 'PATH=/Users/test/.local/bin/node/bin:/usr/bin:/bin',
-      '--env', 'BOTMUX_SESSION_ID=sid-1',
     ]);
     const launcherPath = paneLauncherPath();
     expect(basename(launcherPath)).toBe('pi');
     expect(captured.launcherMode).toBe(0o700);
     expect(captured.launcherScript).toContain(
-      "PATH='/Users/test/.local/bin/node/bin:/usr/bin:/bin'\nexport PATH\n"
+      "export PATH='/Users/test/.local/bin/node/bin:/usr/bin:/bin'\nexport BOTMUX_SESSION_ID='sid-1'\n"
       + "exec '" + cliBin + "' '--session-id' 'sid-1' '" + prompt + "'\n",
     );
     expect(captured.pollCount).toBe(2);
@@ -490,10 +516,10 @@ describe('HerdrBackend.spawn', () => {
 
     const launcherPath = paneLauncherPath();
     expect(basename(launcherPath)).toBe('claude');
-    expect(herdrCall('workspace', 'create')).toContain('PATH=/home/test/.local/bin:/usr/bin:/bin');
+    expect(herdrCall('workspace', 'create')).not.toContain('--env');
     // Read during the first detection poll, while the launcher still exists.
     expect(captured.launcherScript).toContain(
-      "PATH='/home/test/.local/bin:/usr/bin:/bin'\nexport PATH\n"
+      "export PATH='/home/test/.local/bin:/usr/bin:/bin'\nexport BOTMUX_SESSION_ID='sid-1'\n"
       + "exec '/usr/bin/env' 'XDG_RUNTIME_DIR=/run/user/1000' 'DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus' "
       + "'systemd-run' '--user' '--scope' '--quiet' '--collect' "
       + "'--unit=botmux-session-sid-1.scope' '--property=KillMode=control-group' "

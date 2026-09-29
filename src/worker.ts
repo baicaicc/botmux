@@ -120,6 +120,7 @@ import { remoteWorkerShutdownInputBlocker } from './core/remote-worker-shutdown-
 import { ReadyGate, shouldArmReadyGate } from './utils/ready-gate.js';
 import { shouldRunStartupCommandsOnSpawn, shouldDeferInitialPromptForStartup } from './core/startup-commands.js';
 import { sanitizePerBotEnv } from './core/per-bot-env.js';
+import { resolveKllLaunch, validateKllLaunch, validateKllExtraArgs } from './services/kll-launch.js';
 import { normalizeExistingAppServerEndpoint } from './core/existing-app-server.js';
 import { resolveChildBotsConfig } from './core/config-dir.js';
 import {
@@ -2285,6 +2286,7 @@ function ensureZellijAttachConfig(): string {
 
 let sessionId = '';
 let lastInitConfig: Extract<DaemonToWorker, { type: 'init' }> | null = null;
+let kllSelectedProfileId: string | undefined;
 
 /** 本会话最终回复的投递方式。daemon 在 init 上冻结（core/reply-delivery.ts），
  *  抑制闸据此判断 final 是「兜底」还是「投递通道」。读不到一律 'send'——
@@ -13519,6 +13521,7 @@ async function spawnCli(
   cfg: Extract<DaemonToWorker, { type: 'init' }>,
   opts: { pluginGenerationPrepared?: boolean } = {},
 ): Promise<void> {
+  validateKllLaunch(cfg);
   const spawnGeneration = ++cliSpawnGeneration;
   if (cfg.cliInstanceBinding && cfg.cliInstanceBinding.source !== 'legacy' && cfg.backendType === 'tmux') {
     TmuxBackend.assertInstanceIdentity(TmuxBackend.sessionName(cfg.sessionId), codexInstanceIdentity(cfg.cliInstanceBinding, cfg.cliRuntime));
@@ -13749,6 +13752,9 @@ async function spawnCli(
     ? 'dsh-tui'
     : cfg.cliId as CliId;
   cliAdapter = createCliAdapterSync(effectiveCliId, cfg.cliPathOverride);
+  if (cfg.kll && cfg.cliId === 'codebuddy') {
+    validateKllLaunch({ ...cfg, cliPathOverride: realpathSync(cliAdapter.resolvedBin) });
+  }
   const cardActionCapabilities = pluginCardActionCapabilitiesEnv(cfg);
   // backendType trust-but-verify + HARD GATE (PTY 退役): an explicit per-bot
   // config (or BACKEND_TYPE env override) bypasses config.ts's default, so the
@@ -14781,6 +14787,21 @@ async function spawnCli(
     willReattachPersistent = false;
   }
 
+  // Select once before adapter settings/argv are built. Reattachment keeps the
+  // already-running CLI. Restarts reuse the selected model, never tier-fail over.
+  if (cfg.kll && !willReattachPersistent && effectiveBackendType === 'herdr') {
+    HerdrBackend.assertProtectedEnvironmentLaunch();
+  }
+  const kllLaunch = resolveKllLaunch(cfg, {
+    reattach: willReattachPersistent,
+    selectedProfileId: kllSelectedProfileId,
+  });
+  if (kllLaunch) {
+    kllSelectedProfileId = kllLaunch.profileId;
+    cfg = { ...cfg, model: kllLaunch.model, env: kllLaunch.env };
+    send({ type: 'kll_model_selected', profileId: kllLaunch.profileId, model: kllLaunch.model });
+  }
+
   // The worker establishes trust before any runner output can be parsed. A
   // fresh runner gets a new capability; a persistent reattach reloads the
   // capability created by that same runner generation.
@@ -15166,7 +15187,9 @@ async function spawnCli(
       if (sandboxRequested) {
         try { canonDir = realpathSync(settingsDir); } catch { /* 目录可能尚未创建，保留 lexical */ }
       }
-      perBotSettingsFilePath = join(canonDir, 'botmux-launch-settings.json');
+      perBotSettingsFilePath = join(canonDir, kllLaunch
+        ? `botmux-kll-${createHash('sha256').update(cfg.sessionId).digest('hex').slice(0, 16)}.json`
+        : 'botmux-launch-settings.json');
 
     }
   }
@@ -15262,6 +15285,14 @@ async function spawnCli(
       ? nativeSubagentRuntimeHookCommand()
       : undefined,
   });
+  if (kllLaunch && cliAdapter.claudeDataDir) {
+    // A missing --settings would allow user/project provider settings to win.
+    // The ordinary adapter keeps its historical fallback; KLL must fail closed.
+    if (!perBotSettingsFilePath || !args.includes(perBotSettingsFilePath)) {
+      throw new Error('KLL requires protected Claude launch settings; the native CLI was not started');
+    }
+    chmodSync(perBotSettingsFilePath, 0o600);
+  }
   // Pi's deferred long-first-prompt command is implemented by a session-scoped
   // extension. Keep its launch args across owned process restarts while the
   // queued/in-flight command may still need replay.
@@ -15276,7 +15307,11 @@ async function spawnCli(
   if (cliAdapter.allowExtraArgs === false && (process.env.CLI_EXTRA_ARGS ?? '').trim()) {
     log(`Ignoring CLI_EXTRA_ARGS for fixed-contract adapter ${cliAdapter.id}`);
   }
-  if (extra) args.push(...extra.split(/\s+/).filter(Boolean));
+  if (extra) {
+    const extraArgs = extra.split(/\s+/).filter(Boolean);
+    if (kllLaunch) validateKllExtraArgs(cfg, extraArgs);
+    args.push(...extraArgs);
+  }
 
   // Claude Code 在 root/sudo 下会拒绝 --dangerously-skip-permissions 并立即 exit。
   // botmux 必须带这个 flag（话题里没法弹交互式审批），所以为 root 自动注入
@@ -15688,6 +15723,7 @@ async function spawnCli(
   // merged into childEnv) so the tmux/zellij backends inject it via the per-pane
   // `/usr/bin/env` prefix and never into the shared backing-server global env,
   // keeping it from leaking across bots. Re-sanitized here (crossed IPC).
+  for (const key of kllLaunch?.removeEnv ?? []) delete childEnv[key];
   const perBotInjectEnv = sanitizePerBotEnv(cfg.env);
   if (cliAdapter.id === 'ebsd') assertEbsdPerBotEnv(perBotInjectEnv);
   const perBotInjectKeys = Object.keys(perBotInjectEnv);
@@ -20300,6 +20336,7 @@ process.on('message', async (raw: unknown) => {
           break;
         }
       }
+      validateKllLaunch(msg);
       lastInitConfig = msg;
       if (msg.cliInstanceBinding && (msg.cliId !== 'codex' || msg.adoptMode || msg.existingAppServerEndpoint)) {
         throw new Error('Codex instance binding is incompatible with this worker init');
