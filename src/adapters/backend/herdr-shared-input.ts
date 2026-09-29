@@ -4,6 +4,7 @@ import {basename,join} from 'node:path';
 import {readFileSync} from 'node:fs';
 import {claudeDataDirForPid} from '../../services/claude-data-dir.js';
 import {codebuddySession,codebuddyTranscript,drainCodeBuddyTranscript} from '../../services/codebuddy-transcript.js';
+import {codebuddyActionPrompt} from '../../services/codebuddy-action-prompt.js';
 import xterm from '@xterm/headless';
 
 /** A short-lived controller for one externally owned HERDR submission.
@@ -38,10 +39,21 @@ export class HerdrSharedInput {
   }
   pin():number|undefined {this.source=this.inspect();return this.codebuddyPid;}
   verify():void {if(this.inspect()!==this.source)throw new Error('原 Agent 身份已变化。');}
+  private refusal(message:string,screen?:string):Error {
+    if(!this.codebuddyPid)return new Error(message);
+    try {
+      this.verify();
+      screen ??= execFileSync('herdr',['--session',this.session,'pane','read',this.pane,'--source','visible','--format','text'],{encoding:'utf8',timeout:5000,stdio:['ignore','pipe','pipe']});
+      this.verify();
+      const prompt=codebuddyActionPrompt(screen);
+      if(prompt)return new Error(`${message}\n${prompt}`);
+    }catch{}
+    return new Error(message);
+  }
   async acquire():Promise<void> {
     if(!this.source || this.inspect()!==this.source)throw new Error('原 Agent 已退出或被替换；消息保留，未发送。');
     this.wrote=false;
-    if(['working','blocked'].includes(this.status))throw new Error('原 Agent 正在工作或等待交互；消息保留，未发送。');
+    if(['working','blocked'].includes(this.status))throw this.refusal('原 Agent 正在工作或等待交互；消息保留，未发送。');
     if(this.codebuddyPid) {
       const meta=codebuddySession(this.codebuddyPid);if(!meta)throw new Error('CodeBuddy 原生身份未确认。');
       const file=codebuddyTranscript(meta.sessionId,meta.cwd);
@@ -100,7 +112,7 @@ export class HerdrSharedInput {
             // slash menus and unrecognized UI. Idle alone is insufficient.
             if(!emptyComposer && Date.now()-started<1500){settle=setTimeout(inspectComposer,100);return;}
             finished=true;
-            if(!emptyComposer)return done(new Error('原终端有草稿、权限对话框或尚未就绪；消息保留，未发送。'));
+            if(!emptyComposer)return done(this.refusal('原终端有草稿、权限对话框或尚未就绪；消息保留，未发送。',rows.join('\n')));
             try {if(this.inspect()!==this.source)throw new Error('原 Agent 身份已变化。');done();}catch(error){done(error as Error);}
           });};
           settle=setTimeout(inspectComposer,250);
