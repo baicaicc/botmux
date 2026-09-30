@@ -173,6 +173,7 @@ export class TerminalDeviceGateway {
     });
     const forwarded = request.headers.filter(line => !/^(cookie|authorization|x-botmux-[^:]*|forwarded|x-forwarded-[^:]*|cf-access-[^:]*)\s*:/i.test(line));
     forwarded.push(`X-Botmux-Terminal-Control: ${grant}`);
+    forwarded.push('X-Botmux-Terminal-Device: 1');
     return {
       kind: 'forward', rest: `/?access=${scope}`, headers: forwarded,
       isAuthorized: () => {
