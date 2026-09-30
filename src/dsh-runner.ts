@@ -40,6 +40,7 @@ import { errorMessage } from './utils/error-message.js';
 import { createRunnerTerminal } from './runner-common.js';
 import { parseArgs, MAX_TURN_TIMEOUT_MS, type Args } from './dsh-runner-args.js';
 import { appendPendingNotification } from './dsh-runner-pending.js';
+import { runDshLiveRunnerMain } from './dsh-live-runner.js';
 
 const DSH_MARKER = '::botmux-dsh:';
 const EMPTY_TURN_REPLY = 'DeepSeek Harness 已结束本轮处理，但没有生成最终回复；无法确认任务是否成功，请查看会话执行记录。';
@@ -891,9 +892,14 @@ async function main(): Promise<void> {
   prompt();
 }
 
-process.on('SIGTERM', () => process.exit(0));
-
-main().catch(err => {
+// Explicit per-bot connection selects the official Web owner's existing
+// session. The default SDK runner retains its original launch behavior.
+const liveConnectionFile = process.env.DSH_LIVE_CONNECTION_FILE?.trim();
+if (!liveConnectionFile) process.on('SIGTERM', () => process.exit(0));
+const running = liveConnectionFile
+  ? runDshLiveRunnerMain([...process.argv.slice(2), '--connection-file', liveConnectionFile])
+  : main();
+running.catch(err => {
   output.error(`dsh runner failed: ${errorMessage(err)}\n`);
   process.exit(1);
 });
