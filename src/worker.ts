@@ -22184,6 +22184,9 @@ async function spawnCli(
     solo: cfg.solo,
     locale: cfg.locale,
     model: ttadkGateway ? undefined : cfg.model,
+    // KLL catalog model id when KLL owns this spawn's selection (dsh renders
+    // its per-session route overlay from it); other adapters ignore the field.
+    kllModelId: kllLaunch?.modelId,
     modelBackendVariant: cfg.modelBackendVariant,
     // dsh runner only; other adapters ignore the field.
     turnTimeoutMs: cfg.turnTimeoutMs,

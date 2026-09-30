@@ -1,4 +1,5 @@
-import { mkdirSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { chmodSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { CLI_MODEL_CHOICES } from './model-choices.js';
@@ -8,6 +9,7 @@ import { writeRunnerInput } from './runner-input.js';
 import { runnerArgv0 } from '../../core/self-spawn.js';
 import { resolveRunnerPath } from './runner-path.js';
 import { ensureDshQuestionBridgePatch, type DshQuestionBridgePatch } from '../dsh-question-bridge.js';
+import { dshKllRoute, renderDshKllPatch } from '../../services/dsh-kll-route.js';
 
 function pushOpt(args: string[], key: string, value: string | undefined): void {
   if (value === undefined || value.length === 0) return;
@@ -59,7 +61,7 @@ export function createDshAdapter(pathOverride?: string): CliAdapter {
       return bridge ? [bridge.readonlyRoot] : [];
     },
 
-    buildArgs({ sessionId, workingDir, botName, botOpenId, locale, model, turnTimeoutMs, dshProfile }) {
+    buildArgs({ sessionId, workingDir, botName, botOpenId, locale, model, turnTimeoutMs, dshProfile, kllModelId }) {
       // Pre-create the native dsh home + sessions subdir in the real HOME
       // before the worker enters the sandbox: the sandbox's keepExisting
       // filter drops authPaths that don't exist yet, and the runner can't
@@ -70,6 +72,24 @@ export function createDshAdapter(pathOverride?: string): CliAdapter {
       mkdirSync(activeDshHome, { recursive: true });
       mkdirSync(join(activeDshHome, 'profiles'), { recursive: true });
       mkdirSync(join(activeDshHome, 'sessions', 'botmux'), { recursive: true });
+      // KLL-selected model: render the private route overlay (no credentials —
+      // the pi-ai provider reads its key from the runner's environment, which
+      // KLL delivered through the protected launch-env file). An unregistered
+      // selection fails the spawn instead of falling back to the profile's
+      // own provider default.
+      let kllPatch: string | undefined;
+      if (kllModelId) {
+        const route = dshKllRoute(kllModelId);
+        const selectedModel = model && model.trim() ? model.trim() : '';
+        if (!route || route.model !== selectedModel) {
+          throw new Error(`KLL selected dsh model ${kllModelId} without a matching botmux route; the native CLI was not started`);
+        }
+        const kllDir = join(activeDshHome, 'botmux', 'kll');
+        mkdirSync(kllDir, { recursive: true });
+        kllPatch = join(kllDir, `${sessionId}.yml`);
+        writeFileSync(kllPatch, renderDshKllPatch(kllModelId), { mode: 0o600 });
+        chmodSync(kllPatch, 0o600);
+      }
       const args = [
         runnerArgv0('dsh-runner', resolveRunnerPath('dsh-runner.js', { testOverrideEnv: 'BOTMUX_TEST_DSH_RUNNER_PATH' })),
         '--session-id', sessionId,
@@ -80,6 +100,7 @@ export function createDshAdapter(pathOverride?: string): CliAdapter {
       pushOpt(args, '--bot-open-id', botOpenId);
       pushOpt(args, '--locale', locale);
       pushOpt(args, '--model', model && model.trim() ? model.trim() : undefined);
+      pushOpt(args, '--kll-patch', kllPatch);
       const profile = dshProfile && dshProfile.trim() ? dshProfile.trim() : 'botmux';
       pushOpt(args, '--dsh-profile', profile);
       // Legacy DSH has a single provider seat. Only auto-inject into the

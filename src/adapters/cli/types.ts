@@ -245,6 +245,11 @@ export interface CliAdapter {
      *  `--model` flag (or equivalent) inject it here; adapters whose CLI has no
      *  such concept simply ignore the field. Empty / undefined → CLI default. */
     model?: string;
+    /** KLL catalog model id when KLL owns this launch's model selection (the
+     *  selected cli model arrives via `model`). Adapters without a registered
+     *  KLL route ignore the field; dsh renders its per-session route overlay
+     *  from it and fails the spawn when no route matches. */
+    kllModelId?: string;
     /** Optional per-bot turn timeout in milliseconds for runner-based adapters
      *  (dsh / MiniMax). Forwarded as `--turn-timeout-ms`; semantics belong to the runner;
      *  adapters without a runner turn timeout ignore the field. */

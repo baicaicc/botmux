@@ -77,5 +77,73 @@ describe('closed-session card for a precise-id-only CLI', () => {
     const md = markdown(buildClosedSessionCard(session('chat-1'), 'zh'));
     expect(md).toContain('cursor-agent --resume chat-1');
     expect(md).not.toContain(freshNote);
+  it('feeds the tier into fallBackToFresh (not a standalone side branch)', () => {
+    const start = workerSource.indexOf('const fallBackToFresh =');
+    expect(start).toBeGreaterThan(-1);
+    const block = workerSource.slice(start, start + 400);
+    expect(block).toContain('missingExactResumeId');
+  });
+
+  it('demotes effectiveResume + emits the existing fresh-demotion user_notify', () => {
+    // The tier must land inside the `if (fallBackToFresh)` block that already
+    // drops resume and notifies — not a parallel silent path.
+    const fbStart = workerSource.indexOf('if (fallBackToFresh) {');
+    expect(fbStart).toBeGreaterThan(-1);
+    const block = workerSource.slice(fbStart, fbStart + 2200);
+    expect(block).toContain('effectiveResume = false;');
+    expect(block).toContain('effectiveCliSessionId = undefined;');
+    expect(block).toContain('resumeFallbackNotified');
+    expect(block).toContain('user_notify');
+    expect(block).toContain('新起一个干净会话');
+  });
+
+  it('gives the missing-id case its own reason in the notice', () => {
+    expect(workerSource).toContain('no persisted CLI session id');
+  });
+
+  it('never demotes when reattaching to a live persistent pane (no context is lost)', () => {
+    const start = workerSource.indexOf('const missingExactResumeId');
+    expect(start).toBeGreaterThan(-1);
+    const block = workerSource.slice(start, start + 400);
+    expect(block).toContain('!willReattachPersistent');
+  });
+
+  it('suppresses the fresh-demotion notice when no CLI transcript ever existed (first-turn launch recovery)', () => {
+    // A first-turn launch that dies before the CLI writes its session file has
+    // no user-visible history; the fallback is recovery, not context loss, and
+    // the user-facing notice is a false alarm.
+    const fbStart = workerSource.indexOf('if (fallBackToFresh) {');
+    expect(fbStart).toBeGreaterThan(-1);
+    const block = workerSource.slice(fbStart, fbStart + 2400);
+    expect(block).toContain('suppressFallbackNotice');
+    expect(block).toContain('!cliTranscriptEverExisted');
+    expect(block).toContain('resumeFallbackNotified');
+  });
+
+  it('marks the transcript as existing when the bridge baselines against the JSONL file', () => {
+    const fnStart = workerSource.indexOf('function bridgeAbsorbBaseline(): void {');
+    expect(fnStart).toBeGreaterThan(-1);
+    const block = workerSource.slice(fnStart, fnStart + 800);
+    expect(block).toContain('cliTranscriptEverExisted = true');
+  });
+});
+
+// ─── Card copy wiring (source lock) ─────────────────────────────────────────
+describe('resume copy distinction (source lock)', () => {
+  it('card-handler picks the fresh receipt variant via resumeStartsFresh', () => {
+    const source = readFileSync(resolvePath('src/im/lark/card-handler.ts'), 'utf8');
+    expect(source).toContain("t('card.action.resume_success_fresh'");
+    expect(source).toContain('resumeStartsFresh(result.ds.session)');
+  });
+
+  it('closed-session-card passes the fresh flag into the card builder', () => {
+    const source = readFileSync(resolvePath('src/core/closed-session-card.ts'), 'utf8');
+    expect(source).toContain('resumeStartsFresh({ cliId: closedCliId, cliSessionId: ds.session.cliSessionId })');
+  });
+
+  it('card-builder renders the fresh note instead of the generic resume note', () => {
+    const source = readFileSync(resolvePath('src/im/lark/card-builder.ts'), 'utf8');
+    expect(source).toContain('resumeStartsFresh?: boolean');
+    expect(source).toContain("t('card.body.resume_starts_fresh'");
   });
 });

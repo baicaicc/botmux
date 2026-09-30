@@ -34,12 +34,22 @@ type LaunchInput = {
   codexRpcInput?: boolean;
   existingAppServerEndpoint?: string;
   backendType?: string;
+  /** dsh runtime variant ('tui' boots the raw TUI adapter, not the SDK runner). */
+  dshRuntime?: unknown;
 };
 
 export function validateKllLaunch(input: LaunchInput): void {
   if (!input.kll || input.adoptMode) return;
-  if (!['claude-code', 'codebuddy', 'kimi', 'codex'].includes(input.cliId)) throw new Error('KLL requires a supported native CLI adapter');
+  if (!['claude-code', 'codebuddy', 'kimi', 'codex', 'dsh'].includes(input.cliId)) throw new Error('KLL requires a supported native CLI adapter');
   if (input.cliId === 'codebuddy' && /WorkBuddy[^/]*\.app\//i.test(input.cliPathOverride ?? '')) throw new Error('KLL cb requires standalone CodeBuddy');
+  if (input.cliId === 'dsh') {
+    // Live mode binds an already-running official Web owner whose model and
+    // permissions are authoritative; KLL launch-time selection cannot apply.
+    if (typeof input.env?.DSH_LIVE_CONNECTION_FILE === 'string' && input.env.DSH_LIVE_CONNECTION_FILE.trim()) {
+      throw new Error('KLL dsh cannot combine with the live Web owner binding (DSH_LIVE_CONNECTION_FILE)');
+    }
+    if (input.dshRuntime === 'tui') throw new Error('KLL dsh requires the SDK runner; the dsh-tui runtime is not supported');
+  }
   if (input.wrapperCli || input.cliLaunchMode || input.codexRpcInput || input.existingAppServerEndpoint
       || (input.backendType !== undefined && !['herdr', 'pty'].includes(input.backendType))) {
     throw new Error('KLL requires a local interactive CLI without a wrapper or RPC mode');
@@ -99,9 +109,10 @@ export function resolveKllLaunch(
     } catch {
       throw new Error('KLL returned an invalid result or protected environment file');
     }
-    // AllInOne's existing catalog names the Codex terminal route codex-herdr;
-    // BotMux keeps its native codex adapter/session identity throughout.
-    const expectedAgent = input.cliId === 'codex' ? 'codex-herdr' : input.cliId;
+    // AllInOne's existing catalog names the Codex terminal route codex-herdr and
+    // the dsh runner route dsh-harness; BotMux keeps its native adapter/session
+    // identity throughout.
+    const expectedAgent = input.cliId === 'codex' ? 'codex-herdr' : input.cliId === 'dsh' ? 'dsh-harness' : input.cliId;
     if (result?.schemaVersion !== 1 || result.agent !== expectedAgent
         || typeof result.modelId !== 'string' || !result.modelId
         || typeof result.profileRef?.id !== 'string' || !result.profileRef.id
@@ -111,6 +122,11 @@ export function resolveKllLaunch(
         || !values || typeof values !== 'object' || Array.isArray(values)
         || !Object.entries(values).every(([key, value]) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(key) && typeof value === 'string' && !value.includes('\0'))) {
       throw new Error('KLL returned an incompatible launch contract');
+    }
+    // dsh routes are per-model: without a native cliModel the runner would fall
+    // back to the profile's own provider default, which KLL must never do.
+    if (input.cliId === 'dsh' && typeof result.cliModel !== 'string') {
+      throw new Error('KLL returned no dsh route model; the native CLI was not started');
     }
     const env = sanitizePerBotEnv(input.env);
     const removeEnv = new Set<string>(result.launch.removeEnv);
@@ -125,7 +141,18 @@ export function resolveKllLaunch(
       // --settings file so a user's old provider cannot reappear at startup.
       if (input.cliId === 'claude-code' && (key.startsWith('ANTHROPIC_') || key.startsWith('CLAUDE_CODE_OAUTH'))) env[key] = '';
     }
+    // KLL strips every DSH_*/DEEPSEEK_* key it observed, including the daemon's
+    // own process-level DSH_HOME. That home is where botmux's dsh profiles and
+    // sessions live and what the adapter bound into the sandbox, so it leaves
+    // the removal set the worker applies to the child environment. The KLL home
+    // pointer in the env file below is not consumed for the same reason.
+    if (input.cliId === 'dsh') removeEnv.delete('DSH_HOME');
     const overrides = values as Record<string, string>;
+    // KLL's dsh env names its own dsh home (where KLL's web profiles live).
+    // BotMux's SDK runner keeps the process-level DSH_HOME it already bound
+    // into the sandbox and where its profiles/sessions live, so that value is
+    // deliberately not consumed; every other reserved key stays a hard error.
+    if (input.cliId === 'dsh' && typeof overrides.DSH_HOME === 'string') delete overrides.DSH_HOME;
     const sanitized = sanitizePerBotEnv(overrides);
     if (Object.keys(sanitized).length !== Object.keys(overrides).length) throw new Error('KLL environment contains reserved session variables');
     Object.assign(env, sanitized);

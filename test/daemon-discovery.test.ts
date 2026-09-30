@@ -54,6 +54,7 @@ describe('daemon discovery', () => {
       botName: 'codex-loopy',
       cliId: 'codex',
       pid: 123,
+      processStartIdentity: 'recorded-birth',
       lastHeartbeat: Date.now(),
     }));
 
@@ -65,6 +66,7 @@ describe('daemon discovery', () => {
       dispatchLaunchIpcProtocol: 'v1',
       botName: 'codex-loopy',
       cliId: 'codex',
+      processStartIdentity: 'recorded-birth',
     })]);
   });
 

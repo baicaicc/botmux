@@ -32,6 +32,8 @@ export interface OnlineDaemonInfo {
   botName?: string;
   cliId?: string;
   pid?: number;
+  /** Birth identity recorded atomically by the daemon (raw platform format). */
+  processStartIdentity?: string;
   lastHeartbeat?: number;
 }
 
@@ -87,7 +89,6 @@ export function listOnlineDaemons(dataDir?: string, opts: { strict?: boolean } =
       const raw = readFileSync(join(dir, f), 'utf-8');
       const d = JSON.parse(raw) as Partial<OnlineDaemonInfo>;
       if (typeof d.ipcPort !== 'number' || typeof d.larkAppId !== 'string') continue;
-      if (now - (d.lastHeartbeat ?? 0) > DAEMON_HEARTBEAT_STALE_MS) continue;
       out.push({
         larkAppId: d.larkAppId,
         ipcPort: d.ipcPort,
@@ -109,11 +110,19 @@ export function listOnlineDaemons(dataDir?: string, opts: { strict?: boolean } =
         ...(typeof d.botName === 'string' && d.botName.trim() ? { botName: d.botName.trim() } : {}),
         ...(typeof d.cliId === 'string' && d.cliId.trim() ? { cliId: d.cliId.trim() } : {}),
         pid: d.pid,
+        ...(typeof d.processStartIdentity === 'string' && d.processStartIdentity
+          ? { processStartIdentity: d.processStartIdentity } : {}),
         lastHeartbeat: d.lastHeartbeat,
       });
     } catch { /* malformed — skip */ }
   }
   return out;
+}
+
+/** List every daemon whose descriptor file is fresh (heartbeat within STALE_MS). */
+export function listOnlineDaemons(dataDir?: string): OnlineDaemonInfo[] {
+  const now = Date.now();
+  return listDaemonDescriptors(dataDir).filter(d => now - (d.lastHeartbeat ?? 0) <= DAEMON_HEARTBEAT_STALE_MS);
 }
 
 /** Find a specific online daemon by larkAppId. Returns null if offline / not found. */

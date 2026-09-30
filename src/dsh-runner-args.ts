@@ -21,6 +21,9 @@ export interface Args {
   model?: string;
   dshProfile?: string;
   bridgePatch?: string;
+  /** KLL 私有路由 overlay（见 services/dsh-kll-route.ts）。存在即表示本轮启动的
+   *  provider 与 model 由 KLL 决定，profile 自身的 provider 默认值与凭据引用不再参与。 */
+  kllPatch?: string;
   /** Opt-in idle watchdog in ms. Absent (the default) means no turn timer is
    *  armed at all — the turn runs until dsh reports idle. */
   turnTimeoutMs?: number;
@@ -40,6 +43,7 @@ export function parseArgs(argv: string[]): Args {
     '--model': 'model',
     '--dsh-profile': 'dshProfile',
     '--bridge-patch': 'bridgePatch',
+    '--kll-patch': 'kllPatch',
     '--turn-timeout-ms': (target, val) => {
       const n = Number(val);
       // The watchdog is opt-in. An invalid value is ignored (stays disabled)
