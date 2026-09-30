@@ -34,6 +34,7 @@ import { join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { parse as parseYaml } from 'yaml';
 import { RunnerControlWriter } from './adapters/cli/runner-control-channel.js';
+import { DSH_KLL_PROVIDER, DSH_KLL_API_KEY_ENV } from './services/dsh-kll-route.js';
 import { runDshLiveRunnerMain } from './dsh-live-runner.js';
 
 const DSH_MARKER = '::botmux-dsh:';
@@ -68,6 +69,10 @@ interface Args {
   model?: string;
   dshProfile?: string;
   bridgePatch?: string;
+  /** Private KLL route overlay (see services/dsh-kll-route.ts). Presence means
+   *  KLL owns this launch's provider and model; the profile's own provider
+   *  defaults and credential refs are then not consulted. */
+  kllPatch?: string;
   turnTimeoutMs: number;
 }
 
@@ -113,6 +118,7 @@ function parseArgs(argv: string[]): Args {
     else if (key === '--model' && val !== undefined) { out.model = val; i++; }
     else if (key === '--dsh-profile' && val !== undefined) { out.dshProfile = val; i++; }
     else if (key === '--bridge-patch' && val !== undefined) { out.bridgePatch = val; i++; }
+    else if (key === '--kll-patch' && val !== undefined) { out.kllPatch = val; i++; }
     else if (key === '--turn-timeout-ms' && val !== undefined) {
       const n = Number(val);
       // Accept only a positive integer within the arm-able bound; anything else
@@ -405,7 +411,12 @@ function loadCredentials(): Record<string, string> {
  *  Precedence:
  *  1. --dsh-profile (default "botmux") — profile name under ~/.dsh/profiles/.
  *  2. Provider & model from ~/.dsh/settings.yaml for the initialize RPC.
- *  3. Credentials from ~/.dsh/.credentials.yaml. */
+ *  3. Credentials from ~/.dsh/.credentials.yaml.
+ *
+ *  With a KLL route overlay (--kll-patch), KLL owns the provider and the
+ *  credentials: initialize names the overlay's provider and the native
+ *  credential refs are not merged, so no file-held key of another provider can
+ *  reach the dsh child. The API key itself arrives via the environment. */
 function resolveNativeDshConfig(): NativeDshConfig {
   const profileName = args.dshProfile?.trim() || DEFAULT_DSH_PROFILE;
 
@@ -429,9 +440,9 @@ function resolveNativeDshConfig(): NativeDshConfig {
 
   return {
     profileName,
-    provider,
+    provider: args.kllPatch ? DSH_KLL_PROVIDER : provider,
     model: args.model?.trim() || settingsModel || DEFAULT_MODEL,
-    credentials: loadCredentials(),
+    credentials: args.kllPatch ? {} : loadCredentials(),
   };
 }
 
@@ -490,6 +501,9 @@ class DshJsonRpcClient {
   start(): void {
     const dshArgs = ['--profile', this.profileName];
     if (args.bridgePatch) dshArgs.push(`--patch=${args.bridgePatch}`);
+    // --patch is repeatable and composes after the profile layer; the KLL
+    // route overlay goes last so it outranks both the profile and the bridge.
+    if (args.kllPatch) dshArgs.push(`--patch=${args.kllPatch}`);
     this.child = spawn(this.dshBin, dshArgs, {
       env: this.env,
       cwd: this.cwd,
@@ -887,6 +901,12 @@ function handleInput(data: Buffer): void {
 }
 
 async function main(): Promise<void> {
+  // Fail closed when the KLL route is active but its credential environment
+  // did not reach the runner: the dsh child would otherwise boot and only
+  // fail at the first model call, after the session looks healthy.
+  if (args.kllPatch && !process.env[DSH_KLL_API_KEY_ENV]?.trim()) {
+    throw new Error(`KLL dsh route is active but ${DSH_KLL_API_KEY_ENV} is missing; the native CLI was not started`);
+  }
   const native = resolveNativeDshConfig();
   // Sessions live under the native dsh home (~/.dsh/sessions/botmux/<id>),
   // not ~/.botmux — the adapter binds ~/.dsh into the sandbox.

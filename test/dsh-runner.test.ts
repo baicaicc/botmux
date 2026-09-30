@@ -11,6 +11,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnTsScript } from './helpers/ts-runner.js';
+import { renderDshKllPatch } from '../src/services/dsh-kll-route.js';
 
 const RUNNER_PATH = resolve('src/dsh-runner.ts');
 const FAKE_SERVER = resolve('test/fixtures/fake-dsh-server.mjs');
@@ -172,6 +173,42 @@ describe('dsh-runner', () => {
     expect(argvEntry?.argv[0]).toBe('--profile');
     expect(argvEntry?.argv[1]).toBe('botmux');
     expect(argvEntry?.argv).toContain('--patch=/tmp/botmux-bridge.yml');
+  });
+
+  it('applies a KLL route overlay: extra --patch, pinned provider/model, no file credentials', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'dsh-runner-kll-'));
+    writeNativeDshConfig(home, SUPER_RELAY_SETTINGS, 'SUPER_RELAY_API_KEY: file-held-secret\n');
+    const overlay = join(home, 'kll-route.yml');
+    writeFileSync(overlay, renderDshKllPatch('glm-5.3'), 'utf8');
+    h = spawnRunner('happy', ['--kll-patch', overlay, '--model', 'glm-5.3'], {
+      ALLINONE_DSH_API_KEY: 'kll-env-key',
+      FAKE_DSH_EXPECT_ENV_JSON: JSON.stringify({ ALLINONE_DSH_API_KEY: 'kll-env-key' }),
+      FAKE_DSH_EXPECT_ABSENT_ENV: 'SUPER_RELAY_API_KEY',
+    }, home);
+    await waitFor(() => h.stdout.includes('›'), { label: 'ready marker' });
+
+    const entries = readLog(h);
+    const argvEntry = entries.find((entry: any) => Array.isArray(entry.argv));
+    expect(argvEntry?.argv).toContain(`--patch=${overlay}`);
+    // The KLL overlay composes after the profile layer (and the bridge patch).
+    expect(argvEntry?.argv.filter((a: string) => a.startsWith('--patch=')).length).toBe(1);
+    const initEntry = entries.find((r: any) => r.initialize);
+    expect(initEntry.initialize.provider).toBe('allinone-kll');
+    expect(initEntry.initialize.model).toBe('glm-5.3');
+  });
+
+  it('fails closed when a KLL route is active without its credential environment', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'dsh-runner-kll-'));
+    const overlay = join(home, 'kll-route.yml');
+    writeFileSync(overlay, renderDshKllPatch('deepseek-v4-flash'), 'utf8');
+    h = spawnRunner('happy', ['--kll-patch', overlay, '--model', 'deepseek-v4-flash'], {
+      ALLINONE_DSH_API_KEY: '',
+    }, home);
+    const exitPromise = new Promise<number | null>(resolve => h!.child.on('exit', resolve));
+    const code = await exitPromise;
+    expect(code).toBe(1);
+    expect(h.stdout + h.stderr).toContain('ALLINONE_DSH_API_KEY');
+    expect(h.stdout).not.toContain('dsh connected');
   });
 
   it('fails fast when the dsh binary is missing', async () => {

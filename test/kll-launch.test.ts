@@ -8,7 +8,8 @@ import { createClaudeCodeAdapter } from '../src/adapters/cli/claude-code.js';
 
 const result = { schemaVersion: 1, agent: 'claude-code', modelId: 'glm5.3', profileRef: { id: 'profile-glm' }, cliModel: 'glm-5.3', launch: { removeEnv: ['ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPIC_BASE_URL'] } };
 const input = { kll: { tier: 'strong' as const }, cliId: 'claude-code', backendType: 'herdr' };
-function resolver(response: unknown = result, env = { ANTHROPIC_API_KEY: 'new-secret', ANTHROPIC_BASE_URL: 'https://selected.example' }) {
+const dshResult = { schemaVersion: 1, agent: 'dsh-harness', modelId: 'glm-5.3', profileRef: { id: 'profile-dsh' }, cliModel: 'glm-5.3', launch: { removeEnv: ['ALLINONE_DSH_API_KEY', 'DSH_HOME', 'DEEPSEEK_API_KEY', 'DSH_LIVE_CONNECTION_FILE'] } };
+function resolver(response: unknown = result, env: Record<string, string> = { ANTHROPIC_API_KEY: 'new-secret', ANTHROPIC_BASE_URL: 'https://selected.example' }) {
   let path = '';
   return { execute: vi.fn((_bin: string, args: string[]) => {
     path = args.at(-1)!;
@@ -75,8 +76,40 @@ describe('KLL native launch selection', () => {
     expect(selected.model).toBeUndefined();
     expect(fake.execute.mock.calls[0][1][1]).toBe('codex');
   });
+  it('maps dsh onto the harness catalog route and keeps credentials env-only', () => {
+    const fake = resolver(dshResult, { ALLINONE_DSH_API_KEY: 'dsh-secret', DSH_HOME: '/allinone/.runtime/dsh-home' });
+    const selected = resolveKllLaunch({ ...input, cliId: 'dsh', env: { DEEPSEEK_API_KEY: 'old-secret', HTTP_PROXY: 'http://proxy' } }, fake)!;
+    expect(fake.execute.mock.calls[0][1][1]).toBe('dsh');
+    expect(fake.execute.mock.calls[0][1].join(' ')).not.toMatch(/dsh-secret|old-secret/);
+    expect(selected.modelId).toBe('glm-5.3');
+    expect(selected.model).toBe('glm-5.3');
+    expect(selected.env).toEqual({ HTTP_PROXY: 'http://proxy', ALLINONE_DSH_API_KEY: 'dsh-secret' });
+    expect(selected.removeEnv).toContain('DEEPSEEK_API_KEY');
+    expect(selected.removeEnv).toContain('DSH_LIVE_CONNECTION_FILE');
+    // BotMux's own process-level dsh home survives; KLL's home pointer is not consumed.
+    expect(selected.removeEnv).not.toContain('DSH_HOME');
+    expect(fake.cleaned()).toBe(true);
+  });
   it.each([
-    { wrapperCli: 'aiden x claude' }, { codexRpcInput: true }, { backendType: 'mojo' }, { backendType: 'tmux' }, { backendType: 'zellij' }, { cliId: 'dsh' },
+    { env: { DSH_LIVE_CONNECTION_FILE: '/dsh-home/botmux/live/connection.json' } },
+    { dshRuntime: 'tui' },
+  ])('rejects dsh runtimes KLL cannot own: %j', changes => {
+    const execute = vi.fn();
+    expect(() => resolveKllLaunch({ ...input, cliId: 'dsh', ...changes }, { execute })).toThrow();
+    expect(execute).not.toHaveBeenCalled();
+  });
+  it('rejects a dsh selection without a native route model', () => {
+    const fake = resolver({ ...dshResult, cliModel: null }, { ALLINONE_DSH_API_KEY: 'k' });
+    expect(() => resolveKllLaunch({ ...input, cliId: 'dsh' }, fake)).toThrow('no dsh route model');
+    expect(fake.cleaned()).toBe(true);
+  });
+  it('still rejects reserved KLL environment beyond the dsh home pointer', () => {
+    const fake = resolver(dshResult, { ALLINONE_DSH_API_KEY: 'k', DSH_HOME: '/kll-home', BOTMUX_SESSION: 'hijack' });
+    expect(() => resolveKllLaunch({ ...input, cliId: 'dsh' }, fake)).toThrow('reserved session variables');
+    expect(fake.cleaned()).toBe(true);
+  });
+  it.each([
+    { wrapperCli: 'aiden x claude' }, { codexRpcInput: true }, { backendType: 'mojo' }, { backendType: 'tmux' }, { backendType: 'zellij' }, { cliId: 'gemini' },
     { cliId: 'codebuddy', cliPathOverride: '/Applications/WorkBuddy.app/Contents/Resources/codebuddy' },
   ])('rejects a conflicting runtime before launch', changes => {
     const execute = vi.fn();

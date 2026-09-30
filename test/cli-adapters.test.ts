@@ -7,7 +7,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import { homedir, tmpdir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, appendFileSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, appendFileSync, readFileSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { codexHome } from '../src/services/codex-paths.js';
 
 // ---------------------------------------------------------------------------
@@ -1006,6 +1006,51 @@ describe('dsh buildArgs (runner model)', () => {
   it('omits --model when no model is configured', () => {
     const args = adapter.buildArgs({ sessionId: 's', resume: false });
     expect(args).not.toContain('--model');
+  });
+
+  it('renders the private KLL route overlay for a KLL-selected model', () => {
+    const root = mkdtempSync(join(tmpdir(), 'dsh-kll-home-'));
+    const previousDshHome = process.env.DSH_HOME;
+    try {
+      process.env.DSH_HOME = join(root, 'active-dsh-home');
+      const kllAdapter = createDshAdapter('/opt/dsh/bin/dsh');
+      const args = kllAdapter.buildArgs({ sessionId: 's-kll', resume: false, model: 'glm-5.3', kllModelId: 'glm-5.3' });
+      const patchIdx = args.indexOf('--kll-patch');
+      expect(patchIdx).toBeGreaterThanOrEqual(0);
+      const patchPath = args[patchIdx + 1];
+      expect(patchPath).toBe(join(root, 'active-dsh-home', 'botmux', 'kll', 's-kll.yml'));
+      const overlay = readFileSync(patchPath, 'utf8');
+      // GLM Coding Plan endpoint, pinned provider/model, and the credential
+      // env var NAME — the API key itself never enters the overlay or argv.
+      expect(overlay).toContain('https://open.bigmodel.cn/api/coding/paas/v4');
+      expect(overlay).toContain('allinone-kll');
+      expect(overlay).toContain('glm-5.3');
+      expect(overlay).toContain('ALLINONE_DSH_API_KEY');
+      expect(overlay).toContain('"disabled": true');
+      expect(statSync(patchPath).mode & 0o777).toBe(0o600);
+      expect(args[args.indexOf('--model') + 1]).toBe('glm-5.3');
+      expect(args.join(' ')).not.toMatch(/apiKey['":]?\s*['"][A-Za-z0-9_-]{8,}/);
+    } finally {
+      if (previousDshHome === undefined) delete process.env.DSH_HOME;
+      else process.env.DSH_HOME = previousDshHome;
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('fails the spawn when KLL selects a dsh model without a registered route', () => {
+    expect(() => adapter.buildArgs({ sessionId: 's', resume: false, model: 'kimi-k2', kllModelId: 'kimi-k2' }))
+      .toThrow('without a matching botmux route');
+  });
+
+  it('fails the spawn when the KLL catalog id and the cli model disagree', () => {
+    expect(() => adapter.buildArgs({ sessionId: 's', resume: false, model: 'glm-5.3-flash', kllModelId: 'glm-5.3' }))
+      .toThrow('without a matching botmux route');
+  });
+
+  it('does not emit a KLL overlay without a KLL selection', () => {
+    const args = adapter.buildArgs({ sessionId: 's', resume: false, model: 'deepseek-v4-flash' });
+    expect(args).not.toContain('--kll-patch');
+    expect(args).toContain('--model');
   });
 
   it('forwards a per-bot turn timeout to the runner', () => {
