@@ -95,16 +95,6 @@ export interface KimiNativeFailure {
 }
 
 const normalized = (text: string) => text.replace(/\s+/g, ' ').trim();
-/** The wire prompt must be compared VERBATIM against the marked content.
- * The `&lt;`/`&gt;` pairs a first-turn wire contains are NOT kimi escaping:
- * the prompt composer itself pre-escapes tag-like prose tokens
- * (escapeXmlTagLikeTokens in shared-hints / identity routing_rules, #640).
- * Kimi records the submitted prompt byte-for-byte — verified 2026-09-30 by
- * rebuilding the live first-turn msg with the deployed composer and diffing:
- * raw == wire exactly (2333 chars), while entity-decoding the wire broke the
- * match at the first pre-escaped token (`botmux quoted &lt;message_id&gt;`)
- * and silently dropped every cold-turn quota failure. Raw `<` also survives
- * on the wire (heredoc `<<'EOF'`, structural tags), so kimi escapes nothing. */
 const sameProcess = (a: KimiNativeOwner, b: KimiNativeOwner) => a.pid === b.pid && a.birth === b.birth && a.cwd === b.cwd;
 
 /** Failure-only observer: successful Kimi turns retain their existing
@@ -196,11 +186,13 @@ export class KimiNativeFailureObserver {
           const text = Array.isArray(row.input) ? row.input.filter((b: any) => b.type === 'text' && typeof b.text === 'string')
             .map((b: any) => b.text).join('\n') : '';
           const wireText = normalized(text);
-          // An empty prompt is not a user turn — e.g. the bare Enter kimi's
-          // writeInput sends ahead of the first real input to dismiss the
-          // workspace-trust modal can submit an empty composer. Skip it;
-          // only a non-empty mismatched prompt invalidates the mark.
-          if (!wireText) continue;
+          // A valid, text-only empty prompt cannot prove the tracked input.
+          // Skip it only before binding; other prompts retain the exact guards.
+          if (!pending.nativePromptId && row.origin?.kind === 'user'
+            && Number.isSafeInteger(row.turnId) && row.turnId >= 0
+            && typeof row.promptId === 'string' && row.promptId
+            && Array.isArray(row.input) && row.input.every((b: any) => b?.type === 'text' && typeof b.text === 'string')
+            && !wireText) continue;
           if (row.origin?.kind !== 'user' || !Number.isSafeInteger(row.turnId) || row.turnId < 0
             || typeof row.promptId !== 'string' || !row.promptId || wireText !== pending.content
             || (pending.nativePromptId && (pending.nativePromptId !== row.promptId || pending.nativeTurnId !== row.turnId))) { this.clear(); return; }

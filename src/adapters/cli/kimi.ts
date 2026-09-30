@@ -8,8 +8,6 @@ import { delay } from '../../utils/timing.js';
 const BRACKETED_PASTE_START = '\x1b[200~';
 const BRACKETED_PASTE_END = '\x1b[201~';
 const KIMI_FIRST_WRITE_SETTLE_MS = 250;
-/** Lead time for the pre-input bare Enter below: kimi needs a moment between
- * accepting its workspace-trust modal and accepting composer input. */
 const KIMI_TRUST_MODAL_SETTLE_MS = 800;
 const kimiFirstWriteSeen = new WeakSet<PtyHandle>();
 
@@ -61,19 +59,12 @@ export function createKimiAdapter(pathOverride?: string): CliAdapter {
     async writeInput(pty: PtyHandle, content: string) {
       if (!kimiFirstWriteSeen.has(pty)) {
         kimiFirstWriteSeen.add(pty);
-        // Kimi's first input in an untrusted workspace is preceded by a
-        // workspace-trust confirmation modal — `--yolo` does not bypass it
-        // (it is only an "Ask When Needed" permission mode). The modal
-        // consumes the first Enter: a combined paste+submit leaves the text
-        // as an unsubmitted draft while the worker releases turn authority
-        // on prompt_ready (observed 2026-09-30 17:34Z — the trust record's
-        // trustedAt matched the write instant to the second, and the native
-        // session/wire only appeared 31min later when the draft finally
-        // submitted). Send a bare Enter FIRST and let kimi accept its own
-        // modal and write the trust record; on an already-trusted workspace
-        // the composer is empty and the Enter is a no-op (the kimi
-        // native-failure observer ignores empty prompt rows).
-        pty.write('\r');
+        // Give Kimi's first-workspace trust prompt a separate Enter and settle
+        // window before the complete composer frame. A failed first write is
+        // ambiguous and must stop this submission before any content is sent.
+        if (pty.write('\r') === false) {
+          throw new Error('Kimi input write was not confirmed; delivery is ambiguous.');
+        }
         await delay(KIMI_TRUST_MODAL_SETTLE_MS);
         await delay(KIMI_FIRST_WRITE_SETTLE_MS);
       }
@@ -84,8 +75,8 @@ export function createKimiAdapter(pathOverride?: string): CliAdapter {
       const written = pty.write(`${BRACKETED_PASTE_START}${content}${BRACKETED_PASTE_END}\r`);
       if (written === false) {
         // The write may have reached the CLI. Let the worker's existing
-        // ambiguous-write path report it; never silently succeed or retry.
-        throw new Error('Kimi input write was not confirmed; delivery is ambiguous and was not retried.');
+        // ambiguous-write path report it instead of silently succeeding.
+        throw new Error('Kimi input write was not confirmed; delivery is ambiguous.');
       }
     },
 

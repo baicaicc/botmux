@@ -15,21 +15,22 @@ describe('Kimi native input submission', () => {
     await vi.runAllTimersAsync();
     expect(await pending).toBeUndefined(); // Issued, without inventing native submit evidence.
     expect(pty.write).toHaveBeenCalledTimes(2);
-    expect(pty.write).toHaveBeenNthCalledWith(1, '\r'); // trust-modal settle Enter
+    expect(pty.write).toHaveBeenNthCalledWith(1, '\r');
     expect(pty.write).toHaveBeenNthCalledWith(2, frame);
     expect(pty.pasteText).not.toHaveBeenCalled();
     expect(pty.sendSpecialKeys).not.toHaveBeenCalled();
   });
 
-  it('sends the trust-modal settle Enter only before the first input', async () => {
+  it('sends the trust prompt Enter only before the first input on a backend', async () => {
     const adapter = createKimiAdapter('/not-invoked/kimi');
-    const written: string[] = [];
-    const pty: PtyHandle = {write: vi.fn(data => {written.push(data); return true;})};
+    const pty: PtyHandle = {write: vi.fn(() => true), pasteText: vi.fn(), sendSpecialKeys: vi.fn()};
     const first = adapter.writeInput(pty, content);
     await vi.runAllTimersAsync();
     await first;
     await adapter.writeInput(pty, content);
-    expect(written).toEqual(['\r', frame, frame]);
+    expect(vi.mocked(pty.write).mock.calls.map(([text]) => text)).toEqual(['\r', frame, frame]);
+    expect(pty.pasteText).not.toHaveBeenCalled();
+    expect(pty.sendSpecialKeys).not.toHaveBeenCalled();
   });
 
   it('keeps the same complete frame for a backend exposing only raw write', async () => {
@@ -42,9 +43,36 @@ describe('Kimi native input submission', () => {
     expect(pty.write).toHaveBeenNthCalledWith(2, frame);
   });
 
-  it('surfaces an unconfirmed write without resending text or Enter', async () => {
+  it('stops before content when the initial Enter is unconfirmed even if a later write would succeed', async () => {
+    const pty: PtyHandle = {write: vi.fn().mockReturnValueOnce(false).mockReturnValue(true),
+      pasteText: vi.fn(), sendSpecialKeys: vi.fn()};
+    const outcome = Promise.allSettled([createKimiAdapter('/not-invoked/kimi').writeInput(pty, content)]);
+    await vi.runAllTimersAsync();
+    const [result] = await outcome;
+    expect(result.status).toBe('rejected');
+    if (result.status === 'rejected') expect(result.reason.message).toContain('delivery is ambiguous');
+    expect(pty.write).toHaveBeenCalledExactlyOnceWith('\r');
+    expect(pty.pasteText).not.toHaveBeenCalled();
+    expect(pty.sendSpecialKeys).not.toHaveBeenCalled();
+  });
+
+  it('propagates an initial Enter exception without writing content or replacement input', async () => {
+    const error = new Error('QA initial backend disconnected');
+    const pty: PtyHandle = {write: vi.fn().mockImplementationOnce(() => {throw error;}).mockReturnValue(true),
+      pasteText: vi.fn(), sendSpecialKeys: vi.fn()};
+    const outcome = Promise.allSettled([createKimiAdapter('/not-invoked/kimi').writeInput(pty, content)]);
+    await vi.runAllTimersAsync();
+    const [result] = await outcome;
+    expect(result.status).toBe('rejected');
+    if (result.status === 'rejected') expect(result.reason).toBe(error);
+    expect(pty.write).toHaveBeenCalledExactlyOnceWith('\r');
+    expect(pty.pasteText).not.toHaveBeenCalled();
+    expect(pty.sendSpecialKeys).not.toHaveBeenCalled();
+  });
+
+  it('surfaces an unconfirmed frame without resending text or Enter', async () => {
     const written: string[] = [];
-    const pty: PtyHandle = {write: vi.fn(data => {written.push(data); return false;}),
+    const pty: PtyHandle = {write: vi.fn(data => {written.push(data); return data === '\r';}),
       pasteText: vi.fn(), sendSpecialKeys: vi.fn()};
     const outcome = Promise.allSettled([createKimiAdapter('/not-invoked/kimi').writeInput(pty, content)]);
     await vi.runAllTimersAsync();
@@ -56,14 +84,19 @@ describe('Kimi native input submission', () => {
     expect(pty.sendSpecialKeys).not.toHaveBeenCalled();
   });
 
-  it('propagates a backend exception instead of silently claiming success', async () => {
+  it('propagates a frame exception instead of silently claiming success or resending', async () => {
     const error = new Error('QA backend disconnected');
-    const pty: PtyHandle = {write: vi.fn(() => {throw error;})};
+    const pty: PtyHandle = {write: vi.fn().mockReturnValueOnce(true).mockImplementation(() => {throw error;}),
+      pasteText: vi.fn(), sendSpecialKeys: vi.fn()};
     const outcome = Promise.allSettled([createKimiAdapter('/not-invoked/kimi').writeInput(pty, content)]);
     await vi.runAllTimersAsync();
     const [result] = await outcome;
     expect(result.status).toBe('rejected');
     if (result.status === 'rejected') expect(result.reason).toBe(error);
-    expect(pty.write).toHaveBeenCalledOnce();
+    expect(pty.write).toHaveBeenCalledTimes(2);
+    expect(pty.write).toHaveBeenNthCalledWith(1, '\r');
+    expect(pty.write).toHaveBeenNthCalledWith(2, frame);
+    expect(pty.pasteText).not.toHaveBeenCalled();
+    expect(pty.sendSpecialKeys).not.toHaveBeenCalled();
   });
 });
