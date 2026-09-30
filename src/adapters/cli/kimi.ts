@@ -67,8 +67,8 @@ export function createKimiAdapter(pathOverride?: string): CliAdapter {
       const written = pty.write(`${BRACKETED_PASTE_START}${content}${BRACKETED_PASTE_END}\r`);
       if (written === false) {
         // The write may have reached the CLI. Let the worker's existing
-        // ambiguous-write path report it; never silently succeed or retry.
-        throw new Error('Kimi input write was not confirmed; delivery is ambiguous and was not retried.');
+        // ambiguous-write path report it instead of silently succeeding.
+        throw new Error('Kimi input write was not confirmed; delivery is ambiguous.');
       }
     },
 

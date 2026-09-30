@@ -67,7 +67,7 @@ it('drops an earlier error when native recovery produces a later answer', () => 
   expect(drainCodeBuddyTranscript(file, pending.newOffset).events.map(event => [event.text, event.terminalStatus])).toEqual([['recovered', 'completed']]);
 });
 
-it('keeps request-wide Stop restricted to explicit errors, never to normal assistant text', () => {
+it('does not complete normal assistant text without a timestamped request Stop', () => {
   const {file, stop} = fixture([user, {...failure, status: 'completed', providerData: {conversationRequestId: 'request'}}]);
   stop();
   expect(drainCodeBuddyTranscript(file, 0).events.map(event => event.kind)).toEqual(['user']);

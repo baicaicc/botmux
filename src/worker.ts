@@ -12739,7 +12739,12 @@ async function flushPending(): Promise<void> {
           };
           log('Held definitely-unwritten input until ZMX recovery restart');
         } else {
-          requeueUnsubmittedQueuedActivation(item);
+          // Kimi's atomic input can have reached the editor before a write
+          // fails. Replaying an opening could duplicate that partial input.
+          // Keep the known-unwritten path eligible for its existing retry.
+          if (lastInitConfig?.cliId !== 'kimi' || !normalWritePrepared) {
+            requeueUnsubmittedQueuedActivation(item);
+          }
           if (recoveryFailureReason) inflightInputs.retire(item);
         }
         if (dispatchStillPending && durableWrite && item.turnId && !recoveryFailureReason) {
