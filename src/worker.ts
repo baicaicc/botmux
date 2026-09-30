@@ -3173,9 +3173,16 @@ function markKimiNativeTurn(content: string, turnId?: string, dispatchAttempt?: 
   kimiFailureGeneration = undefined;
   if (lastInitConfig?.cliId !== 'kimi' || !(backend instanceof HerdrBackend) || !turnId) return;
   const source = backend.getKimiNativeOwner();
-  if (!source) return;
+  if (!source) {
+    // A kimi turn whose owner cannot be pinned at write time gets NO failure
+    // observation at all — surface it instead of failing silently (a cold
+    // herdr sample that drops exactly here is invisible in every other log).
+    log(`Kimi failure observer not armed: owner unresolved at write time (turn=${shortCorrelationId(turnId)})`);
+    return;
+  }
   kimiNativeFailureObserver.mark(source, {content, turnId, dispatchAttempt});
   if (kimiNativeFailureObserver.active) kimiFailureGeneration = {backend, generation: cliSpawnGeneration};
+  else log(`Kimi failure observer not armed: mark rejected the pinned owner (turn=${shortCorrelationId(turnId)})`);
 }
 
 function checkKimiNativeFailure(): void {
@@ -3187,7 +3194,15 @@ function checkKimiNativeFailure(): void {
   }
   const source = fence.backend.getKimiNativeOwner();
   const failure = kimiNativeFailureObserver.poll(source);
-  if (!failure || !source) return;
+  if (!failure || !source) {
+    // poll() clears the mark on a prompt/terminal mismatch or a storage-fence
+    // reject — i.e. this turn's failure will never be delivered. That drop is
+    // otherwise indistinguishable from "nothing happened" in the logs.
+    if (!kimiNativeFailureObserver.active) {
+      log(`Kimi failure mark dropped without delivery (wire mismatch or storage fence, turn=${shortCorrelationId(currentBotmuxTurnId ?? '')})`);
+    }
+    return;
+  }
   const fresh = fence.backend.getKimiNativeOwner();
   if (backend !== fence.backend || cliSpawnGeneration !== fence.generation
     || failure.turnId !== currentBotmuxTurnId || failure.dispatchAttempt !== currentBotmuxDispatchAttempt) {
@@ -12739,12 +12754,7 @@ async function flushPending(): Promise<void> {
           };
           log('Held definitely-unwritten input until ZMX recovery restart');
         } else {
-          // Kimi's atomic input can have reached the editor before a write
-          // fails. Replaying an opening could duplicate that partial input.
-          // Keep the known-unwritten path eligible for its existing retry.
-          if (lastInitConfig?.cliId !== 'kimi' || !normalWritePrepared) {
-            requeueUnsubmittedQueuedActivation(item);
-          }
+          requeueUnsubmittedQueuedActivation(item);
           if (recoveryFailureReason) inflightInputs.retire(item);
         }
         if (dispatchStillPending && durableWrite && item.turnId && !recoveryFailureReason) {

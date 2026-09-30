@@ -73,6 +73,40 @@ describe('Kimi native failure observation', () => {
     expect(observer.poll(source)).toBeUndefined();
   });
 
+  it('matches the wire prompt verbatim — the composer pre-escapes tag-like tokens, kimi records them as-is', () => {
+    // The composer itself escapes literal `<...>` prose tokens
+    // (escapeXmlTagLikeTokens, #640), so the marked content already carries
+    // `&lt;`/`&gt;`; kimi's wire.jsonl records the submitted prompt
+    // byte-for-byte. Verified live 2026-09-30: the deployed composer's output
+    // equals the wire text exactly, raw `<` (heredoc `<<'EOF'`, structural
+    // tags) included — kimi escapes nothing.
+    const composed = 'Use `botmux quoted &lt;message_id&gt;` and heredoc <<\'EOF\'. Reply only QA.';
+    observer.mark(source, {content: composed, turnId: 'lark-qa'}, 1000, root);
+    append(prompt({input: [{type: 'text', text: composed}]}), ended());
+    expect(observer.poll(source)?.turnId).toBe('lark-qa');
+  });
+
+  it('does not entity-decode the wire — decoding breaks composer-escaped prompts (2026-09-30 cold turns)', () => {
+    // Regression for the misdiagnosis that kimi HTML-escapes the wire: the
+    // decoder turned the composer's own `&lt;` into `<` and mismatched every
+    // cold first turn (full routing header = 13 pre-escaped pairs), silently
+    // dropping the quota-failure delivery while warm turns (short header, no
+    // entities) kept matching.
+    const composed = 'Use `botmux quoted &lt;message_id&gt;`. Reply only QA.';
+    observer.mark(source, {content: composed, turnId: 'lark-qa'}, 1000, root);
+    append(prompt({input: [{type: 'text', text: 'Use `botmux quoted <message_id>`. Reply only QA.'}]}), ended());
+    expect(observer.poll(source)).toBeUndefined();
+    expect(observer.active).toBe(false);
+  });
+
+  it('skips an empty prompt row instead of invalidating the mark', () => {
+    // The bare Enter sent ahead of kimi's first real input (workspace-trust
+    // modal settle) can submit an empty composer; that row is not a user turn.
+    mark();
+    append(prompt({input: []}), prompt(), ended());
+    expect(observer.poll(source)?.turnId).toBe('lark-qa');
+  });
+
   it('does not attribute a different local prompt or a superseding prompt to the Lark task', () => {
     mark(); append(prompt({input: [{type: 'text', text: 'a different local task'}]}), ended());
     expect(observer.poll(source)).toBeUndefined(); expect(observer.active).toBe(false);

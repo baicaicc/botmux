@@ -234,7 +234,7 @@ const HUMAN_TYPING_ADAPTERS: AdapterEntry[] = [
 ];
 
 /** Adapters that use tmux pasteText (load-buffer + paste-buffer -d) with
- *  delayed Enter — CoCo / Trae CLI, Codex, Kimi, Pi, and Hermes. See coco.ts for the
+ *  delayed Enter — CoCo / Trae CLI, Codex, Pi, and Hermes. See coco.ts for the
  *  Trae 0.120.31 burst bug, and codex.ts for the per-line-submit bug bracketed paste fixes
  *  (Codex 0.134+ handles bracketed paste correctly — the old "Codex exits on
  *  bracketed paste" note was true only for a much earlier build).
@@ -245,9 +245,16 @@ const HUMAN_TYPING_ADAPTERS: AdapterEntry[] = [
 const PASTE_BUFFER_ADAPTERS: AdapterEntry[] = [
   ['coco', createCocoAdapter('/bin/coco')],
   ['codex', createCodexAdapter('/bin/codex')],
-  ['kimi', createKimiAdapter('/bin/kimi')],
   ['pi', createPiAdapter('/bin/pi')],
   ['hermes', createHermesAdapter('/bin/hermes')],
+];
+
+/** Kimi writes one atomic raw frame (bracketed paste + CR) on EVERY backend:
+ *  HERDR's pasteText sends bare text, which kimi's pi-tui paste-burst detector
+ *  can turn into a stranded draft. See kimi-input.test.ts for the full
+ *  contract, including the first-write trust-modal settle Enter. */
+const KIMI_ADAPTERS: AdapterEntry[] = [
+  ['kimi', createKimiAdapter('/bin/kimi')],
 ];
 
 /** Adapters that wrap content in bracketed-paste markers (\x1b[200~ ... \x1b[201~)
@@ -255,11 +262,13 @@ const PASTE_BUFFER_ADAPTERS: AdapterEntry[] = [
 const BRACKETED_PASTE_FALLBACK_ADAPTERS: AdapterEntry[] = [
   ...HUMAN_TYPING_ADAPTERS,
   ...PASTE_BUFFER_ADAPTERS,
+  ...KIMI_ADAPTERS,
 ];
 
 const ALL_ADAPTERS: AdapterEntry[] = [
   ...HUMAN_TYPING_ADAPTERS,
   ...PASTE_BUFFER_ADAPTERS,
+  ...KIMI_ADAPTERS,
   ...PLAIN_ADAPTERS,
   OPENCODE_ADAPTER,
   ...APP_RUNNER_ADAPTERS,
@@ -721,10 +730,25 @@ describe('reliableTurnTerminal capability', () => {
 // =========================================================================
 
 describe('writeInput: edge cases', () => {
-  it.each(ALL_ADAPTERS)('%s: empty string still submits Enter (tmux)', async (_name, adapter) => {
+  it.each(ALL_ADAPTERS.filter(([name]) => name !== 'kimi'))('%s: empty string still submits Enter (tmux)', async (_name, adapter) => {
     const pty = makeTmuxPty();
     await adapter.writeInput(pty, '');
     expect(pty.sendSpecialKeys).toHaveBeenCalledWith('Enter');
+  });
+
+  it('kimi: empty string still ends its atomic frame with a submitting CR (tmux)', async () => {
+    vi.useFakeTimers();
+    try {
+      const pty = makeTmuxPty();
+      const write = createKimiAdapter('/bin/kimi').writeInput(pty, '');
+      await flushFakeTimers();
+      await write;
+      expect(pty.write).toHaveBeenLastCalledWith('\x1b[200~\x1b[201~\r');
+      expect(pty.pasteText).not.toHaveBeenCalled();
+      expect(pty.sendText).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('cursor: submits then activates the follow-up steer action in tmux', async () => {
@@ -772,111 +796,43 @@ describe('writeInput: edge cases', () => {
       const pty = makeTmuxPty();
 
       const first = adapter.writeInput(pty, 'first');
-      expect(pty.pasteText).not.toHaveBeenCalled();
-      await vi.advanceTimersByTimeAsync(Math.round(250 * TIME_SCALE));
-      expect(pty.pasteText).toHaveBeenCalledOnce();
-      await flushFakeTimers();
+      // The first input to a kimi process is preceded by a bare Enter that
+      // lets kimi dismiss its own workspace-trust modal (kimi-input.test.ts
+      // pins the full rationale); the submit frame only follows after the
+      // settle window, and never on later writes to the same backend.
+      expect(pty.write).toHaveBeenCalledExactlyOnceWith('\r');
+      await vi.advanceTimersByTimeAsync(Math.round(1050 * TIME_SCALE));
       await first;
+      expect(pty.write).toHaveBeenNthCalledWith(2, '\x1b[200~first\x1b[201~\r');
 
       const second = adapter.writeInput(pty, 'second');
-      expect(pty.pasteText).toHaveBeenCalledTimes(2);
       await flushFakeTimers();
       await second;
+      expect(pty.write).toHaveBeenCalledTimes(3);
+      expect(pty.write).toHaveBeenNthCalledWith(3, '\x1b[200~second\x1b[201~\r');
+      expect(pty.pasteText).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
     }
   });
 
-  it('kimi: treats a side-effecting false paste result as assume-issued', async () => {
-    const adapter = createKimiAdapter('/bin/kimi');
-    const pasted: string[] = [];
-    const pty = {
-      write: vi.fn(),
-      pasteText: vi.fn((content: string) => {
-        pasted.push(content);
-        return false;
-      }),
-      sendSpecialKeys: vi.fn(),
-    } satisfies PtyHandle;
+  it('kimi: sends large prompts through one atomic raw write, never sendText', async () => {
+    vi.useFakeTimers();
+    try {
+      const pty = makeTmuxPty();
+      const content = 'routing-context\n' + 'x'.repeat(64 * 1024);
 
-    const result = await adapter.writeInput(pty, MULTILINE);
+      const write = createKimiAdapter('/bin/kimi').writeInput(pty, content);
+      await flushFakeTimers();
+      await write;
 
-    expect(pasted).toEqual([MULTILINE]);
-    expect(pty.pasteText).toHaveBeenCalledTimes(1);
-    expect(pty.sendSpecialKeys).toHaveBeenCalledTimes(1);
-    expect(result).toBeUndefined();
-  });
-
-  it('kimi: treats a side-effecting false Enter result as assume-issued', async () => {
-    const adapter = createKimiAdapter('/bin/kimi');
-    const submittedKeys: string[] = [];
-    const pty = {
-      write: vi.fn(),
-      pasteText: vi.fn(),
-      sendSpecialKeys: vi.fn((...keys: string[]) => {
-        submittedKeys.push(...keys);
-        return false;
-      }),
-    } satisfies PtyHandle;
-
-    const result = await adapter.writeInput(pty, MULTILINE);
-
-    expect(pty.pasteText).toHaveBeenCalledTimes(1);
-    expect(submittedKeys).toEqual(['Enter']);
-    expect(pty.sendSpecialKeys).toHaveBeenCalledTimes(1);
-    expect(result).toBeUndefined();
-  });
-
-  it('kimi: sends large prompts through pasteText instead of argv-bound sendText', async () => {
-    const adapter = createKimiAdapter('/bin/kimi');
-    const pty = makeTmuxPty();
-    const content = 'routing-context\n' + 'x'.repeat(64 * 1024);
-
-    const result = await adapter.writeInput(pty, content);
-
-    expect(pty.pasteText).toHaveBeenCalledWith(content);
-    expect(pty.sendText).not.toHaveBeenCalled();
-    expect(result).toBeUndefined();
-  });
-
-  it('kimi: does not retry when paste transport throws after a side effect', async () => {
-    const adapter = createKimiAdapter('/bin/kimi');
-    const pasted: string[] = [];
-    const pty = {
-      write: vi.fn(),
-      pasteText: vi.fn((content: string) => {
-        pasted.push(content);
-        throw new Error('confirmation timed out');
-      }),
-      sendSpecialKeys: vi.fn(),
-    } satisfies PtyHandle;
-
-    const result = await adapter.writeInput(pty, MULTILINE);
-
-    expect(pasted).toEqual([MULTILINE]);
-    expect(pty.pasteText).toHaveBeenCalledTimes(1);
-    expect(pty.sendSpecialKeys).not.toHaveBeenCalled();
-    expect(result).toBeUndefined();
-  });
-
-  it('kimi: raw PTY false writes remain assume-issued instead of clean non-submit', async () => {
-    const adapter = createKimiAdapter('/bin/kimi');
-    const writes: string[] = [];
-    const pty = {
-      write: vi.fn((data: string) => {
-        writes.push(data);
-        return false;
-      }),
-    } satisfies PtyHandle;
-
-    const result = await adapter.writeInput(pty, MULTILINE);
-
-    expect(writes).toEqual([
-      `\x1b[200~${MULTILINE}\x1b[201~`,
-      '\r',
-    ]);
-    expect(pty.write).toHaveBeenCalledTimes(2);
-    expect(result).toBeUndefined();
+      expect(pty.write).toHaveBeenLastCalledWith(`\x1b[200~${content}\x1b[201~\r`);
+      expect(pty.pasteText).not.toHaveBeenCalled();
+      expect(pty.sendText).not.toHaveBeenCalled();
+      expect(pty.sendSpecialKeys).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('claude-code: image path in multiline still types via sendText', async () => {
