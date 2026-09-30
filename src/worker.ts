@@ -26861,6 +26861,7 @@ ${loginUrl ? `<a id="login-banner" href="${loginUrl}" target="_top" rel="noopene
   </div>
 </form>
 <div id="status" class="err" role="status">加载中…</div>
+${process.env.BOTMUX_TERMINAL_DEVICE_PAIRING === '1' ? '<a id="device-authorization" href="./_device/settings" style="position:fixed;right:8px;top:8px;z-index:60;color:#ddd;background:#222;padding:4px 8px;border-radius:6px;text-decoration:none">设备授权</a>' : ''}
 <div id="status-bytes" aria-hidden="true"></div>
 <div id="boot-error" aria-live="assertive"></div>
 <script>
@@ -26893,7 +26894,9 @@ window.addEventListener('error',_wbBootstrapError,true);
 <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-unicode11@0.8.0/lib/addon-unicode11.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-webgl@0.18.0/lib/addon-webgl.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-canvas@0.7.0/lib/addon-canvas.min.js"></script>
+
 <script>
+var deviceAuthorization=document.getElementById('device-authorization');if(deviceAuthorization){deviceAuthorization.href='./_device/settings?access='+(new URLSearchParams(location.search).get('access')==='write'?'write':'read');}
 var isTouch='ontouchstart'in window||navigator.maxTouchPoints>0;
 if(isTouch){document.body.classList.add('touch');}
 var hasToken=${hasWrite};
