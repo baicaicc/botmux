@@ -7,7 +7,7 @@ vi.mock('node:child_process', async original => ({
   ...await original<typeof import('node:child_process')>(), execFileSync: vi.fn(),
 }));
 import {execFileSync} from 'node:child_process';
-import {findKimiWireSource, inspectHerdrKimiSource, KimiNativeFailureObserver, type KimiNativeSource} from '../src/services/kimi-native-failure.js';
+import {findKimiWireSource, inspectHerdrKimiOwner, inspectHerdrKimiSource, KimiNativeFailureObserver, type KimiNativeSource} from '../src/services/kimi-native-failure.js';
 
 describe('Kimi native failure observation', () => {
   let root: string;
@@ -42,9 +42,11 @@ describe('Kimi native failure observation', () => {
     expect(observer.poll(source)).toBeUndefined();
     append(ended());
     const before = readFileSync(file);
-    expect(observer.poll(source)).toEqual({turnId: 'lark-qa', dispatchAttempt: 3,
+    const failure = observer.poll(source)!;
+    expect(failure).toEqual({nativeSessionId: source.sessionId, turnId: 'lark-qa', dispatchAttempt: 3,
       errorCode: 'kimi_provider_auth_error', summary: "provider.auth_error: 403 You've reached your weekly (7-day) usage limit.",
       retryable: false, completedAtMs: 1010});
+    expect(observer.acknowledge(failure, source)).toBe(true);
     expect(observer.poll(source)).toBeUndefined();
     expect(readFileSync(file)).toEqual(before);
   });
@@ -65,7 +67,9 @@ describe('Kimi native failure observation', () => {
     appendFileSync(file, terminal.slice(0, 40));
     expect(observer.poll(source)).toBeUndefined();
     appendFileSync(file, terminal.slice(40) + '\n');
-    expect(observer.poll(source)?.errorCode).toBe('kimi_provider_auth_error');
+    const failure = observer.poll(source)!;
+    expect(failure.errorCode).toBe('kimi_provider_auth_error');
+    expect(observer.acknowledge(failure, source)).toBe(true);
     expect(observer.poll(source)).toBeUndefined();
   });
 
@@ -74,14 +78,17 @@ describe('Kimi native failure observation', () => {
     expect(observer.poll(source)).toBeUndefined(); expect(observer.active).toBe(false);
     mark(); append(prompt(), prompt({promptId: 'msg_other', turnId: 1}), ended());
     expect(observer.poll(source)).toBeUndefined(); expect(observer.active).toBe(false);
-    mark(); append(prompt(), prompt({turnId: 1}), ended({turnId: 1}));
-    expect(observer.poll(source)).toBeUndefined(); expect(observer.active).toBe(false);
   });
 
   it('ignores subagent terminals and a different native turn id', () => {
     mark(); append(prompt(), ended({agentId: 'agent-1'}), ended({turnId: 1}));
     expect(observer.poll(source)).toBeUndefined();
     append(ended()); expect(observer.poll(source)?.turnId).toBe('lark-qa');
+  });
+
+  it('rejects reuse of the same native prompt id for a different turn', () => {
+    mark(); append(prompt(), prompt({turnId: 1}), ended({turnId: 1}));
+    expect(observer.poll(source)).toBeUndefined(); expect(observer.active).toBe(false);
   });
 
   it.each(['pid', 'birth', 'sessionId', 'cwd'] as const)('fences changes to %s without delivering stale errors', field => {
@@ -120,6 +127,86 @@ describe('Kimi native failure observation', () => {
     mark(); append(prompt(), ended({error: {code: 'provider.auth_error', message: '403 Bearer TEST_SECRET_VALUE_123456789'}}));
     expect(observer.poll(source)?.summary).not.toContain('TEST_SECRET_VALUE_123456789');
   });
+
+  it.each([false, true])('binds first-turn storage after submit when native ID was already published: %s', published => {
+    const dir = join(root, 'sessions', 'wd_qa_hash', source.sessionId);
+    rmSync(dir, {recursive: true});
+    const owner = {cwd: source.cwd, pid: source.pid, birth: source.birth};
+    observer.mark(published ? source : owner, {content, turnId: 'lark-qa'}, 1000, root);
+    expect(observer.active).toBe(true);
+    expect(observer.poll(undefined)).toBeUndefined();
+    expect(observer.poll(owner)).toBeUndefined();
+    expect(observer.active).toBe(true);
+    expect(observer.poll(source)).toBeUndefined();
+    mkdirSync(join(dir, 'agents', 'main'), {recursive: true});
+    writeFileSync(join(dir, 'state.json'), JSON.stringify({version: 2, id: source.sessionId, cwd: root, createdAt: 1000}));
+    const metadata = JSON.stringify({type: 'metadata', protocol_version: '1.5', created_at: 1000});
+    writeFileSync(file, '');
+    expect(observer.poll(source)).toBeUndefined();
+    appendFileSync(file, metadata.slice(0, 30));
+    expect(observer.poll(source)).toBeUndefined();
+    expect(observer.active).toBe(true);
+    appendFileSync(file, metadata.slice(30) + '\n');
+    append(prompt(), ended());
+    const failure = observer.poll(source)!;
+    expect(failure.nativeSessionId).toBe(source.sessionId);
+    expect(observer.acknowledge(failure, undefined)).toBe(false);
+    expect(observer.poll(undefined)).toBeUndefined();
+    expect(observer.poll(source)).toBe(failure);
+    expect(observer.acknowledge(failure, source)).toBe(true);
+    expect(observer.poll(source)).toBeUndefined();
+  });
+
+  it.each(['state', 'metadata'])('never promotes pre-submit %s into first-turn storage', old => {
+    const dir = join(root, 'sessions', 'wd_qa_hash', source.sessionId);
+    rmSync(dir, {recursive: true});
+    observer.mark({cwd: root, pid: source.pid, birth: source.birth}, {content, turnId: 'lark-qa'}, 1000, root);
+    mkdirSync(join(dir, 'agents', 'main'), {recursive: true});
+    writeFileSync(join(dir, 'state.json'), JSON.stringify({version: 2, id: source.sessionId, cwd: root,
+      createdAt: old === 'state' ? 999 : 1000}));
+    writeFileSync(file, JSON.stringify({type: 'metadata', protocol_version: '1.5',
+      created_at: old === 'metadata' ? 999 : 1000}) + '\n');
+    append(prompt(), ended());
+    expect(observer.poll(source)).toBeUndefined();
+  });
+
+  it.each([false, true])('waits for a pre-verified native ID to publish missing or partial wire: %s', partial => {
+    const header = JSON.stringify({type: 'metadata', protocol_version: '1.5', created_at: 900});
+    if (partial) writeFileSync(file, header.slice(0, 20));
+    else rmSync(file);
+    mark();
+    expect(observer.active).toBe(true);
+    expect(observer.poll(source)).toBeUndefined();
+    writeFileSync(file, header + '\n');
+    append(prompt({time: 950}), ended({time: 960}));
+    expect(observer.poll(source)).toBeUndefined();
+    append(prompt(), ended());
+    const failure = observer.poll(source)!;
+    expect(failure.turnId).toBe('lark-qa');
+    expect(observer.acknowledge(failure, source)).toBe(true);
+    expect(observer.poll(source)).toBeUndefined();
+  });
+
+  it('retains a parsed terminal until fresh owner confirmation, then consumes it once', () => {
+    mark(); append(prompt(), ended());
+    const failure = observer.poll(source)!;
+    expect(observer.acknowledge(failure, undefined)).toBe(false);
+    expect(observer.acknowledge(failure, {cwd: root, pid: source.pid, birth: source.birth})).toBe(false);
+    expect(observer.poll(undefined)).toBeUndefined();
+    expect(observer.active).toBe(true);
+    expect(observer.poll(source)).toBe(failure);
+    expect(observer.acknowledge(failure, source)).toBe(true);
+    expect(observer.acknowledge(failure, source)).toBe(false);
+    expect(observer.active).toBe(false);
+  });
+
+  it('rejects confirmed owner changes while retaining a terminal for confirmation', () => {
+    mark(); append(prompt(), ended());
+    const failure = observer.poll(source)!;
+    expect(observer.acknowledge(failure, {...source, birth: 'different birth'})).toBe(false);
+    expect(observer.active).toBe(false);
+    expect(observer.poll(source)).toBeUndefined();
+  });
 });
 
 describe('HERDR Kimi source fencing', () => {
@@ -147,5 +234,20 @@ describe('HERDR Kimi source fencing', () => {
     expect(inspectHerdrKimiSource('qa', 'qa-agent', 100)).toBeUndefined();
     exec.mockReset(); responses(agent, info, 'new birth');
     expect(inspectHerdrKimiSource('qa', 'qa-agent', 100)).toBeUndefined();
+  });
+
+  it('pins a cold physical owner with no native ID, and treats ID publication during sampling as unknown', () => {
+    const {agent_session, ...cold} = agent;
+    exec.mockReturnValueOnce(JSON.stringify({result: {agent: cold}}))
+      .mockReturnValueOnce(JSON.stringify({result: {process_info: info}})).mockReturnValueOnce('known birth')
+      .mockReturnValueOnce(JSON.stringify({result: {agent: cold}}))
+      .mockReturnValueOnce(JSON.stringify({result: {process_info: info}})).mockReturnValueOnce('known birth');
+    expect(inspectHerdrKimiOwner('qa', 'qa-agent', 100)).toEqual({cwd: '/tmp/qa', pid: 100, birth: 'known birth'});
+    exec.mockReset();
+    exec.mockReturnValueOnce(JSON.stringify({result: {agent: cold}}))
+      .mockReturnValueOnce(JSON.stringify({result: {process_info: info}})).mockReturnValueOnce('known birth')
+      .mockReturnValueOnce(JSON.stringify({result: {agent}}))
+      .mockReturnValueOnce(JSON.stringify({result: {process_info: info}})).mockReturnValueOnce('known birth');
+    expect(inspectHerdrKimiOwner('qa', 'qa-agent', 100)).toBeUndefined();
   });
 });

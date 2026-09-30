@@ -6,20 +6,21 @@ import { safeFailureSummary } from './codex-transcript.js';
 
 const SESSION_ID = /^session_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-export interface KimiNativeSource {
-  sessionId: string;
+export interface KimiNativeOwner {
+  sessionId?: string;
   cwd: string;
   pid: number;
   birth: string;
 }
+export interface KimiNativeSource extends KimiNativeOwner { sessionId: string; }
 
 /** Read the selected HERDR Agent's native identity. Never select a recent
  * session by directory, inspect a sibling Agent, or write to the terminal. */
-export function inspectHerdrKimiSource(
+export function inspectHerdrKimiOwner(
   sessionName: string,
   agentName: string,
   expectedPid?: number,
-): KimiNativeSource | undefined {
+): KimiNativeOwner | undefined {
   try {
     const call = (args: string[]) => JSON.parse(execFileSync('herdr', ['--session', sessionName, ...args], {
       encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'],
@@ -28,8 +29,9 @@ export function inspectHerdrKimiSource(
     const before = agent();
     const sid = before?.agent_session;
     const cwd = before?.foreground_cwd ?? before?.cwd;
-    if (before?.name !== agentName || before.agent !== 'kimi' || sid?.kind !== 'id'
-      || sid.source !== 'herdr:kimi' || !SESSION_ID.test(sid.value) || !isAbsolute(cwd ?? '') || !before.pane_id) return;
+    if (before?.name !== agentName || before.agent !== 'kimi'
+      || (sid !== undefined && (sid?.kind !== 'id' || sid.source !== 'herdr:kimi' || !SESSION_ID.test(sid.value)))
+      || !isAbsolute(cwd ?? '') || !before.pane_id) return;
     const processes = () => call(['pane', 'process-info', '--pane', before.pane_id]).result?.process_info;
     const candidates = (info: any) => (info?.foreground_processes ?? []).filter((p: any) =>
       p.pid !== info.shell_pid && (p.name === 'kimi' || p.argv0 === 'kimi-code'
@@ -46,15 +48,20 @@ export function inspectHerdrKimiSource(
     const last = candidates(processes());
     if (!started || birth() !== started || last.length !== 1 || last[0].pid !== pid || last[0].cwd !== cwd
       || after?.name !== before.name || after?.agent !== 'kimi' || after?.pane_id !== before.pane_id
-      || after?.agent_session?.kind !== sid.kind || after.agent_session?.source !== sid.source
-      || after.agent_session?.value !== sid.value || (after.foreground_cwd ?? after.cwd) !== cwd) return;
-    return { sessionId: sid.value, cwd, pid, birth: started };
+      || after?.agent_session?.kind !== sid?.kind || after.agent_session?.source !== sid?.source
+      || after.agent_session?.value !== sid?.value || (after.foreground_cwd ?? after.cwd) !== cwd) return;
+    return { ...(sid ? {sessionId: sid.value} : {}), cwd, pid, birth: started };
   } catch { return; }
+}
+
+export function inspectHerdrKimiSource(sessionName: string, agentName: string, expectedPid?: number): KimiNativeSource | undefined {
+  const owner = inspectHerdrKimiOwner(sessionName, agentName, expectedPid);
+  return owner?.sessionId ? owner as KimiNativeSource : undefined;
 }
 
 /** Kimi native state v2 names its owner explicitly. Require the exact
  * observed session and canonical workspace; ambiguous buckets fail closed. */
-export function findKimiWireSource(source: KimiNativeSource, dataRoot = join(homedir(), '.kimi-code')): string | undefined {
+export function findKimiWireSource(source: KimiNativeSource, dataRoot = join(homedir(), '.kimi-code'), createdAfterMs?: number): string | undefined {
   if (!SESSION_ID.test(source.sessionId) || !isAbsolute(source.cwd)
     || !Number.isSafeInteger(source.pid) || source.pid < 2 || typeof source.birth !== 'string' || !source.birth.trim()) return;
   const root = join(dataRoot, 'sessions');
@@ -68,7 +75,8 @@ export function findKimiWireSource(source: KimiNativeSource, dataRoot = join(hom
       if (!existsSync(stateFile)) continue;
       const state = JSON.parse(readFileSync(stateFile, 'utf8'));
       if (state?.version !== 2 || state.id !== source.sessionId || typeof state.cwd !== 'string'
-        || realpathSync(state.cwd) !== cwd) continue;
+        || realpathSync(state.cwd) !== cwd || (createdAfterMs !== undefined
+          && (!Number.isFinite(state.createdAt) || state.createdAt < createdAfterMs))) continue;
       const file = join(dir, 'agents', 'main', 'wire.jsonl');
       if (existsSync(file)) matches.push(file);
     }
@@ -77,6 +85,7 @@ export function findKimiWireSource(source: KimiNativeSource, dataRoot = join(hom
 }
 
 export interface KimiNativeFailure {
+  nativeSessionId: string;
   turnId: string;
   dispatchAttempt?: number;
   errorCode: string;
@@ -86,7 +95,7 @@ export interface KimiNativeFailure {
 }
 
 const normalized = (text: string) => text.replace(/\s+/g, ' ').trim();
-const identity = (source: KimiNativeSource) => JSON.stringify(source);
+const sameProcess = (a: KimiNativeOwner, b: KimiNativeOwner) => a.pid === b.pid && a.birth === b.birth && a.cwd === b.cwd;
 
 /** Failure-only observer: successful Kimi turns retain their existing
  * botmux-send delivery. A screen/AuthError string is never terminal evidence.
@@ -94,8 +103,10 @@ const identity = (source: KimiNativeSource) => JSON.stringify(source);
  * cannot complete a new task. Partial lines stay unread until completed. */
 export class KimiNativeFailureObserver {
   private pending?: {
-    source: KimiNativeSource;
-    file: string;
+    source: KimiNativeOwner;
+    file?: string;
+    dataRoot?: string;
+    requireNewStorage: boolean;
     offset: number;
     content: string;
     markedAtMs: number;
@@ -104,30 +115,65 @@ export class KimiNativeFailureObserver {
     nativeTurnId?: number;
     nativePromptId?: string;
     promptAtMs?: number;
+    failure?: KimiNativeFailure;
   };
 
   get active(): boolean { return this.pending !== undefined; }
   clear(): void { this.pending = undefined; }
 
-  mark(source: KimiNativeSource, input: { content: string; turnId: string; dispatchAttempt?: number },
+  mark(source: KimiNativeOwner, input: { content: string; turnId: string; dispatchAttempt?: number },
     markedAtMs = Date.now(), dataRoot?: string): void {
     this.clear();
-    const file = findKimiWireSource(source, dataRoot);
-    if (!file || !input.turnId || !input.content.trim()) return;
+    if (!input.turnId || !input.content.trim() || !Number.isSafeInteger(source.pid) || source.pid < 2
+      || !source.birth || !isAbsolute(source.cwd) || !Number.isFinite(markedAtMs)
+      || (source.sessionId !== undefined && !SESSION_ID.test(source.sessionId))) return;
+    let file = source.sessionId === undefined ? undefined : findKimiWireSource(source as KimiNativeSource, dataRoot);
     try {
-      const bytes = readFileSync(file);
-      const metadata = JSON.parse(bytes.subarray(0, bytes.indexOf(10)).toString('utf8'));
-      if (metadata.type !== 'metadata' || metadata.protocol_version !== '1.5') return;
-      this.pending = { source: { ...source }, file, offset: bytes.lastIndexOf(10) + 1,
+      let offset = 0;
+      if (file) {
+        const bytes = readFileSync(file);
+        if (bytes.indexOf(10) < 0) file = undefined;
+        else {
+          const metadata = JSON.parse(bytes.subarray(0, bytes.indexOf(10)).toString('utf8'));
+          if (metadata.type !== 'metadata' || metadata.protocol_version !== '1.5') return;
+          offset = bytes.lastIndexOf(10) + 1;
+        }
+      }
+      this.pending = { source: { ...source }, file, dataRoot, requireNewStorage: source.sessionId === undefined, offset,
         content: normalized(input.content), markedAtMs, turnId: input.turnId, dispatchAttempt: input.dispatchAttempt };
     } catch { /* Unrecognized native storage is not evidence. */ }
   }
 
-  poll(source: KimiNativeSource | undefined): KimiNativeFailure | undefined {
+  poll(source: KimiNativeOwner | undefined): KimiNativeFailure | undefined {
     const pending = this.pending;
     if (!pending) return;
-    if (!source || identity(source) !== identity(pending.source)) { this.clear(); return; }
+    // An incomplete HERDR sample is not evidence of a different owner. Native
+    // identity can be published between the inspector's two reads.
+    if (!source) return;
+    if (!sameProcess(source, pending.source)
+      || (pending.source.sessionId !== undefined && source.sessionId !== undefined
+        && source.sessionId !== pending.source.sessionId)) { this.clear(); return; }
+    if (pending.source.sessionId !== undefined && source.sessionId === undefined) return;
+    if (pending.failure) return pending.failure;
     try {
+      if (!pending.file) {
+        // Fresh Kimi creates state/wire only after its first input. The owner
+        // was pinned before that input. An ID first observed after submit also
+        // requires new state/header timestamps; a pre-verified exact ID can
+        // publish its wire later. Neither case selects by directory recency.
+        if (!source.sessionId) return;
+        if (!SESSION_ID.test(source.sessionId)) { this.clear(); return; }
+        pending.source.sessionId = source.sessionId;
+        const file = findKimiWireSource(source as KimiNativeSource, pending.dataRoot,
+          pending.requireNewStorage ? pending.markedAtMs : undefined);
+        if (!file) return;
+        const bytes = readFileSync(file);
+        if (bytes.indexOf(10) < 0) return;
+        const metadata = JSON.parse(bytes.subarray(0, bytes.indexOf(10)).toString('utf8'));
+        if (metadata.type !== 'metadata' || metadata.protocol_version !== '1.5' || (pending.requireNewStorage
+          && (!Number.isFinite(metadata.created_at) || metadata.created_at < pending.markedAtMs))) { this.clear(); return; }
+        pending.file = file;
+      }
       const bytes = readFileSync(pending.file);
       if (bytes.length < pending.offset) { this.clear(); return; }
       const end = bytes.lastIndexOf(10) + 1;
@@ -148,15 +194,27 @@ export class KimiNativeFailureObserver {
         }
         if (row.type !== 'turn.ended' || !pending.nativePromptId || row.turnId !== pending.nativeTurnId
           || row.time < pending.promptAtMs!) continue;
-        this.clear();
         if (row.reason !== 'failed' || typeof row.error?.code !== 'string' || !row.error.code
-          || !/^[a-z0-9_.-]{1,80}$/i.test(row.error.code)) return;
-        return { turnId: pending.turnId, dispatchAttempt: pending.dispatchAttempt,
+          || !/^[a-z0-9_.-]{1,80}$/i.test(row.error.code)) { this.clear(); return; }
+        pending.failure = { nativeSessionId: pending.source.sessionId!, turnId: pending.turnId, dispatchAttempt: pending.dispatchAttempt,
           errorCode: `kimi_${row.error.code.replaceAll('.', '_')}`,
           summary: safeFailureSummary(row.error),
           ...(typeof row.error.retryable === 'boolean' ? { retryable: row.error.retryable } : {}),
           completedAtMs: row.time };
+        return pending.failure;
       }
     } catch { this.clear(); }
+  }
+
+  /** Consume only after the worker's fresh owner/turn/generation fence. A
+   * missing fresh observation leaves the terminal available for a later tick. */
+  acknowledge(failure: KimiNativeFailure, source: KimiNativeOwner | undefined): boolean {
+    const pending = this.pending;
+    if (!pending || pending.failure !== failure || !source) return false;
+    if (!sameProcess(source, pending.source) || (source.sessionId !== undefined
+      && source.sessionId !== failure.nativeSessionId)) { this.clear(); return false; }
+    if (source.sessionId !== failure.nativeSessionId) return false;
+    this.clear();
+    return true;
   }
 }

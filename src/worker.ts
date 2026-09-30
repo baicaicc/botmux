@@ -3172,7 +3172,7 @@ function markKimiNativeTurn(content: string, turnId?: string, dispatchAttempt?: 
   kimiNativeFailureObserver.clear();
   kimiFailureGeneration = undefined;
   if (lastInitConfig?.cliId !== 'kimi' || !(backend instanceof HerdrBackend) || !turnId) return;
-  const source = backend.getKimiNativeSource();
+  const source = backend.getKimiNativeOwner();
   if (!source) return;
   kimiNativeFailureObserver.mark(source, {content, turnId, dispatchAttempt});
   if (kimiNativeFailureObserver.active) kimiFailureGeneration = {backend, generation: cliSpawnGeneration};
@@ -3185,15 +3185,18 @@ function checkKimiNativeFailure(): void {
     kimiNativeFailureObserver.clear();
     return;
   }
-  const source = fence.backend.getKimiNativeSource();
+  const source = fence.backend.getKimiNativeOwner();
   const failure = kimiNativeFailureObserver.poll(source);
   if (!failure || !source) return;
-  const fresh = fence.backend.getKimiNativeSource();
-  if (!fresh || JSON.stringify(fresh) !== JSON.stringify(source) || backend !== fence.backend
-    || cliSpawnGeneration !== fence.generation || failure.turnId !== currentBotmuxTurnId
-    || failure.dispatchAttempt !== currentBotmuxDispatchAttempt) return;
+  const fresh = fence.backend.getKimiNativeOwner();
+  if (backend !== fence.backend || cliSpawnGeneration !== fence.generation
+    || failure.turnId !== currentBotmuxTurnId || failure.dispatchAttempt !== currentBotmuxDispatchAttempt) {
+    kimiNativeFailureObserver.clear();
+    return;
+  }
+  if (!kimiNativeFailureObserver.acknowledge(failure, fresh)) return;
   send({type: 'final_output', content: failedBridgeFailureText(failure.errorCode, failure.summary),
-    lastUuid: `kimi-${source.sessionId}-${failure.turnId}`, turnId: failure.turnId,
+    lastUuid: `kimi-${failure.nativeSessionId}-${failure.turnId}`, turnId: failure.turnId,
     ...(failure.dispatchAttempt !== undefined ? {dispatchAttempt: failure.dispatchAttempt} : {}), turnFailed: true});
   emitTurnTerminal(failure.turnId, 'failed', failure.errorCode, failure.dispatchAttempt,
     undefined, failure.retryable, failure.completedAtMs);
