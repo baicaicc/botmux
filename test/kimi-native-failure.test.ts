@@ -61,6 +61,74 @@ describe('Kimi native failure observation', () => {
     expect(observer.poll(source)?.turnId).toBe('lark-qa');
   });
 
+  it('matches literal pre-escaped prose and raw tags in a cold first-turn prompt', () => {
+    const literal = '<request>Preserve ' + Array.from({length: 13}, (_, i) => `&lt;example_${i}&gt;`).join(' ')
+      + ' and raw << markers.</request>';
+    const dir = join(root, 'sessions', 'wd_qa_hash', source.sessionId);
+    rmSync(dir, {recursive: true});
+    observer.mark({cwd: source.cwd, pid: source.pid, birth: source.birth},
+      {content: literal, turnId: 'lark-literal', dispatchAttempt: 3}, 1000, root);
+    mkdirSync(join(dir, 'agents', 'main'), {recursive: true});
+    writeFileSync(join(dir, 'state.json'), JSON.stringify({version: 2, id: source.sessionId, cwd: root, createdAt: 1000}));
+    writeFileSync(file, JSON.stringify({type: 'metadata', protocol_version: '1.5', created_at: 1000}) + '\n');
+    append(prompt({input: [{type: 'text', text: literal}]}), ended());
+    const before = readFileSync(file);
+    const failure = observer.poll(source)!;
+    expect(failure.turnId).toBe('lark-literal');
+    expect(failure.errorCode).toBe('kimi_provider_auth_error');
+    expect(observer.acknowledge(failure, source)).toBe(true);
+    expect(observer.poll(source)).toBeUndefined();
+    expect(observer.acknowledge(failure, source)).toBe(false);
+    expect(readFileSync(file)).toEqual(before);
+  });
+
+  it('rejects entity-decoded or entity-encoded text when the literal input differs', () => {
+    const escaped = 'Preserve &lt;example&gt; as written.';
+    const decoded = 'Preserve <example> as written.';
+    observer.mark(source, {content: escaped, turnId: 'lark-literal'}, 1000, root);
+    append(prompt({input: [{type: 'text', text: decoded}]}), ended());
+    expect(observer.poll(source)).toBeUndefined();
+    expect(observer.active).toBe(false);
+    observer.mark(source, {content: decoded, turnId: 'lark-literal'}, 1000, root);
+    append(prompt({input: [{type: 'text', text: escaped}]}), ended());
+    expect(observer.poll(source)).toBeUndefined();
+    expect(observer.active).toBe(false);
+  });
+
+  it.each([{input: []}, {input: [{type: 'text', text: ' \n\t '}]}])('does not bind or finish the tracked input on an empty failed native prompt: %j', ({input}) => {
+    mark();
+    append(prompt({input, promptId: 'msg_empty'}), ended());
+    expect(observer.poll(source)).toBeUndefined();
+    expect(observer.active).toBe(true);
+    append(prompt({promptId: 'msg_actual', turnId: 1, time: 1011}), ended({turnId: 1, time: 1020}));
+    const failure = observer.poll(source)!;
+    expect(failure).toMatchObject({turnId: 'lark-qa', completedAtMs: 1020});
+    expect(observer.poll(source)).toBe(failure);
+    expect(observer.acknowledge(failure, source)).toBe(true);
+    expect(observer.poll(source)).toBeUndefined();
+    expect(observer.acknowledge(failure, source)).toBe(false);
+  });
+
+  it.each([
+    ['image-only input', {input: [{type: 'image', data: 'synthetic-image'}]}],
+    ['invalid origin', {input: [], origin: {kind: 'agent'}}],
+    ['invalid native turn', {input: [], turnId: -1}],
+    ['missing native prompt id', {input: [], promptId: ''}],
+  ])('rejects a text-empty record with %s', (_name, extra) => {
+    mark(); append(prompt(extra), ended());
+    expect(observer.poll(source)).toBeUndefined();
+    expect(observer.active).toBe(false);
+  });
+
+  it('rejects a new empty prompt after literal binding even when the native turn id is reused', () => {
+    mark(); append(prompt());
+    expect(observer.poll(source)).toBeUndefined();
+    expect(observer.active).toBe(true);
+    append(prompt({input: [], promptId: 'msg_other_empty'}), ended());
+    expect(observer.poll(source)).toBeUndefined();
+    expect(observer.active).toBe(false);
+  });
+
   it('holds partial terminal lines without advancing past them', () => {
     mark(); append(prompt());
     const terminal = JSON.stringify(ended());
@@ -71,40 +139,6 @@ describe('Kimi native failure observation', () => {
     expect(failure.errorCode).toBe('kimi_provider_auth_error');
     expect(observer.acknowledge(failure, source)).toBe(true);
     expect(observer.poll(source)).toBeUndefined();
-  });
-
-  it('matches the wire prompt verbatim — the composer pre-escapes tag-like tokens, kimi records them as-is', () => {
-    // The composer itself escapes literal `<...>` prose tokens
-    // (escapeXmlTagLikeTokens, #640), so the marked content already carries
-    // `&lt;`/`&gt;`; kimi's wire.jsonl records the submitted prompt
-    // byte-for-byte. Verified live 2026-09-30: the deployed composer's output
-    // equals the wire text exactly, raw `<` (heredoc `<<'EOF'`, structural
-    // tags) included — kimi escapes nothing.
-    const composed = 'Use `botmux quoted &lt;message_id&gt;` and heredoc <<\'EOF\'. Reply only QA.';
-    observer.mark(source, {content: composed, turnId: 'lark-qa'}, 1000, root);
-    append(prompt({input: [{type: 'text', text: composed}]}), ended());
-    expect(observer.poll(source)?.turnId).toBe('lark-qa');
-  });
-
-  it('does not entity-decode the wire — decoding breaks composer-escaped prompts (2026-09-30 cold turns)', () => {
-    // Regression for the misdiagnosis that kimi HTML-escapes the wire: the
-    // decoder turned the composer's own `&lt;` into `<` and mismatched every
-    // cold first turn (full routing header = 13 pre-escaped pairs), silently
-    // dropping the quota-failure delivery while warm turns (short header, no
-    // entities) kept matching.
-    const composed = 'Use `botmux quoted &lt;message_id&gt;`. Reply only QA.';
-    observer.mark(source, {content: composed, turnId: 'lark-qa'}, 1000, root);
-    append(prompt({input: [{type: 'text', text: 'Use `botmux quoted <message_id>`. Reply only QA.'}]}), ended());
-    expect(observer.poll(source)).toBeUndefined();
-    expect(observer.active).toBe(false);
-  });
-
-  it('skips an empty prompt row instead of invalidating the mark', () => {
-    // The bare Enter sent ahead of kimi's first real input (workspace-trust
-    // modal settle) can submit an empty composer; that row is not a user turn.
-    mark();
-    append(prompt({input: []}), prompt(), ended());
-    expect(observer.poll(source)?.turnId).toBe('lark-qa');
   });
 
   it('does not attribute a different local prompt or a superseding prompt to the Lark task', () => {
