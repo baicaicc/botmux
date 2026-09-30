@@ -11,7 +11,7 @@
  * 注意:
  * - 这个端点 archetype 写死 `PersonalAgent`, 但实测 PersonalAgent 应用是
  *   可以挂 bot 能力的 (`zarazhangrui/feishu-claude-code-bridge` 在用).
- * - 创建时通过 SDK addons 同时申请核心权限、消息事件与卡片回调。平台可能
+ * - 创建时通过 SDK addons 同时申请 BotMux 全功能权限、消息事件与卡片回调。平台可能
  *   忽略租户不支持的名称，所以调用方仍须回读生效权限后才能自动上线。
  * - 指定 appId 时更新原应用，只提交给定的缺失权限；不会创建替代应用。
  * - secret 永远不打印; 错误只暴露 error code / 阶段标签, 不暴露 secret.
@@ -19,6 +19,7 @@
 import { registerApp } from '@larksuiteoapi/node-sdk';
 import qrcode from 'qrcode-terminal';
 import { BOTMUX_REQUIRED_SCOPES, BOTMUX_MESSAGE_NARROW_SCOPES } from './verify-permissions.js';
+import bundledScopeManifest from './lark-scopes.json' with { type: 'json' };
 
 export type RegisterBrand = 'feishu' | 'lark';
 
@@ -67,18 +68,20 @@ export interface RegisterAppOptions {
   onStatusChange?: (info: { status: string; interval?: number }) => void;
 }
 
-/** Keep registration tied to the same core capabilities as startup checks. */
+/** Request all BotMux features by default, using the manifest's identity buckets. */
 export function buildRegistrationAddons(scopeNames?: string[]) {
   const requested = scopeNames ?? [
-    ...BOTMUX_REQUIRED_SCOPES.filter(scope => scope.critical).map(scope => scope.name),
+    ...BOTMUX_REQUIRED_SCOPES.map(scope => scope.name),
     'contact:user.id:readonly', // Resolve configured owner email/phone in this app.
-    'application:application:self_manage', // Read back effective permissions.
   ];
-  const tenant = [...new Set(requested.flatMap(name =>
+  const names = [...new Set(requested.flatMap(name =>
     name === 'im:message' ? [...BOTMUX_MESSAGE_NARROW_SCOPES] : [name],
   ))];
   return {
-    scopes: { tenant, user: [] as string[] },
+    scopes: {
+      tenant: names.filter(name => bundledScopeManifest.scopes.tenant.includes(name)),
+      user: names.filter(name => bundledScopeManifest.scopes.user.includes(name)),
+    },
     ...(scopeNames === undefined ? {
       events: { items: { tenant: ['im.message.receive_v1'] } },
       callbacks: { items: ['card.action.trigger'] },

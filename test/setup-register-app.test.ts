@@ -16,7 +16,8 @@ vi.mock('qrcode-terminal', () => ({
 
 import { registerApp } from '@larksuiteoapi/node-sdk';
 import { tryRegisterApp, buildRegistrationAddons } from '../src/setup/register-app.js';
-import { BOTMUX_REQUIRED_SCOPES, isScopeGranted } from '../src/setup/verify-permissions.js';
+import { BOTMUX_REQUIRED_SCOPES, BOTMUX_MESSAGE_NARROW_SCOPES, isScopeGranted } from '../src/setup/verify-permissions.js';
+import bundledScopeManifest from '../src/setup/lark-scopes.json' with { type: 'json' };
 
 const mockedRegisterApp = registerApp as unknown as ReturnType<typeof vi.fn>;
 
@@ -25,24 +26,32 @@ beforeEach(() => {
 });
 
 describe('tryRegisterApp', () => {
-  it('requests core capabilities and callbacks in the original create authorization', async () => {
+  it('requests all BotMux capabilities and callbacks in the original create authorization', async () => {
     mockedRegisterApp.mockResolvedValue({ client_id: 'cli_new', client_secret: 'new-secret' });
     await tryRegisterApp({ onQRCodeReady: () => {}, onStatusChange: () => {} });
     const request = mockedRegisterApp.mock.calls[0][0];
     expect(request.createOnly).toBe(true);
     expect(request.appId).toBeUndefined();
-    const granted = new Set<string>(request.addons.scopes.tenant);
-    for (const scope of BOTMUX_REQUIRED_SCOPES.filter(scope => scope.critical)) {
+    const granted = new Set<string>([...request.addons.scopes.tenant, ...request.addons.scopes.user]);
+    for (const scope of BOTMUX_REQUIRED_SCOPES) {
       expect(isScopeGranted(scope.name, granted), scope.name).toBe(true);
     }
     expect(granted.has('im:message')).toBe(false);
     expect(granted.has('contact:user.id:readonly')).toBe(true);
     expect(granted.has('application:application:self_manage')).toBe(true);
-    expect(request.addons.scopes.user).toEqual([]);
     expect(request.addons.events.items.tenant).toEqual(['im.message.receive_v1']);
     expect(request.addons.callbacks.items).toEqual(['card.action.trigger']);
-    for (const scope of BOTMUX_REQUIRED_SCOPES.filter(scope => !scope.critical)) {
-      if (scope.name !== 'application:application:self_manage') expect(granted.has(scope.name), scope.name).toBe(false);
+
+    // Every requested capability must appear in exactly the identity buckets
+    // supported by the checked-in manifest; no unrelated manifest scopes leak in.
+    const requested = new Set([
+      ...BOTMUX_REQUIRED_SCOPES.flatMap(scope => scope.name === 'im:message' ? [...BOTMUX_MESSAGE_NARROW_SCOPES] : [scope.name]),
+      'contact:user.id:readonly',
+    ]);
+    for (const bucket of ['tenant', 'user'] as const) {
+      const actual = request.addons.scopes[bucket] as string[];
+      expect(new Set(actual)).toEqual(new Set(bundledScopeManifest.scopes[bucket].filter(name => requested.has(name))));
+      expect(actual.length).toBe(new Set(actual).size);
     }
   });
 
@@ -55,7 +64,7 @@ describe('tryRegisterApp', () => {
     expect(result.ok).toBe(true);
     expect(mockedRegisterApp.mock.calls[0][0]).toMatchObject({
       appId: 'cli_existing', createOnly: false,
-      addons: { scopes: { tenant: ['im:chat.members:read'], user: [] } },
+      addons: { scopes: { tenant: ['im:chat.members:read'], user: ['im:chat.members:read'] } },
     });
     expect(mockedRegisterApp.mock.calls[0][0].addons.events).toBeUndefined();
     expect(mockedRegisterApp.mock.calls[0][0].addons.callbacks).toBeUndefined();
@@ -73,9 +82,48 @@ describe('tryRegisterApp', () => {
   });
 
   it('expands a missing broad message scope into the three required narrow permissions', () => {
-    expect(buildRegistrationAddons(['im:message']).scopes.tenant).toEqual([
-      'im:message:send_as_bot', 'im:message:readonly', 'im:message:update',
-    ]);
+    expect(buildRegistrationAddons(['im:message']).scopes).toEqual({
+      tenant: ['im:message:send_as_bot', 'im:message:readonly', 'im:message:update'],
+      user: ['im:message:readonly', 'im:message:update'],
+    });
+  });
+
+  it('requests feed groups only as user, chat tabs in both buckets, and Buzz as tenant', () => {
+    const { scopes } = buildRegistrationAddons();
+    for (const scope of ['im:feed_group_v1:read', 'im:feed_group_v1:write']) {
+      expect(scopes.user).toContain(scope);
+      expect(scopes.tenant).not.toContain(scope);
+    }
+    for (const scope of ['im:chat.tabs:read', 'im:chat.tabs:write_only']) {
+      expect(scopes.tenant).toContain(scope);
+      expect(scopes.user).toContain(scope);
+    }
+    for (const scope of ['im:message.urgent', 'im:message.urgent:sms', 'im:message.urgent:phone']) {
+      expect(scopes.tenant).toContain(scope);
+      expect(scopes.user).not.toContain(scope);
+    }
+  });
+
+  it('repairs only the specified user and dual-identity scopes without adding callbacks', async () => {
+    mockedRegisterApp.mockResolvedValue({ client_id: 'cli_existing', client_secret: 'old-secret' });
+    const result = await tryRegisterApp({
+      appId: 'cli_existing', scopeNames: ['im:feed_group_v1:read', 'im:chat.tabs:write_only', 'im:feed_group_v1:read'],
+      onQRCodeReady: () => {}, onStatusChange: () => {},
+    });
+    expect(result.ok).toBe(true);
+    expect(mockedRegisterApp.mock.calls[0][0]).toMatchObject({
+      appId: 'cli_existing', createOnly: false,
+      addons: { scopes: {
+        tenant: ['im:chat.tabs:write_only'],
+        user: ['im:feed_group_v1:read', 'im:chat.tabs:write_only'],
+      } },
+    });
+    expect(mockedRegisterApp.mock.calls[0][0].addons.events).toBeUndefined();
+    expect(mockedRegisterApp.mock.calls[0][0].addons.callbacks).toBeUndefined();
+  });
+
+  it('does not turn an explicitly empty repair set into the default permission set', () => {
+    expect(buildRegistrationAddons([])).toEqual({ scopes: { tenant: [], user: [] } });
   });
 
   it('returns ok with appId+secret on success (feishu tenant)', async () => {
