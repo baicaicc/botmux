@@ -155,6 +155,9 @@ describe('checkRequiredScopes — 99991672 (app lacks self_manage)', () => {
 
 describe('ensureVcMeetingEventsSubscribed', () => {
   const vcBot = (config: Record<string, unknown> = {}) => makeBot({ vcMeetingAgent: undefined, ...config });
+describe('checkRequiredScopes — 99991672 chicken-and-egg scope request set', () => {
+  // 截到该分支真正的结尾（发完 self_manage 提示 DM 的那一句），同样不用固定字符宽度。
+  const region = fnRegionUntil('if (infoData.code === 99991672) {', "'self_manage scope check unavailable'");
 
   it('skips non-feishu, apiOnly and VC-disabled bots without probing', async () => {
     for (const bot of [vcBot({ brand: 'lark' }), vcBot({ apiOnly: true }), makeBot()]) {
