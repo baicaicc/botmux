@@ -14,9 +14,22 @@ describe('Kimi native input submission', () => {
     const pending = adapter.writeInput(pty, content);
     await vi.runAllTimersAsync();
     expect(await pending).toBeUndefined(); // Issued, without inventing native submit evidence.
-    expect(pty.write).toHaveBeenCalledExactlyOnceWith(frame);
+    expect(pty.write).toHaveBeenCalledTimes(2);
+    expect(pty.write).toHaveBeenNthCalledWith(1, '\r'); // trust-modal settle Enter
+    expect(pty.write).toHaveBeenNthCalledWith(2, frame);
     expect(pty.pasteText).not.toHaveBeenCalled();
     expect(pty.sendSpecialKeys).not.toHaveBeenCalled();
+  });
+
+  it('sends the trust-modal settle Enter only before the first input', async () => {
+    const adapter = createKimiAdapter('/not-invoked/kimi');
+    const written: string[] = [];
+    const pty: PtyHandle = {write: vi.fn(data => {written.push(data); return true;})};
+    const first = adapter.writeInput(pty, content);
+    await vi.runAllTimersAsync();
+    await first;
+    await adapter.writeInput(pty, content);
+    expect(written).toEqual(['\r', frame, frame]);
   });
 
   it('keeps the same complete frame for a backend exposing only raw write', async () => {
@@ -24,7 +37,9 @@ describe('Kimi native input submission', () => {
     const pending = createKimiAdapter('/not-invoked/kimi').writeInput(pty, content);
     await vi.runAllTimersAsync();
     await pending;
-    expect(pty.write).toHaveBeenCalledExactlyOnceWith(frame);
+    expect(pty.write).toHaveBeenCalledTimes(2);
+    expect(pty.write).toHaveBeenNthCalledWith(1, '\r');
+    expect(pty.write).toHaveBeenNthCalledWith(2, frame);
   });
 
   it('surfaces an unconfirmed write without resending text or Enter', async () => {
@@ -36,7 +51,7 @@ describe('Kimi native input submission', () => {
     const [result] = await outcome;
     expect(result.status).toBe('rejected');
     if (result.status === 'rejected') expect(result.reason.message).toContain('delivery is ambiguous');
-    expect(written).toEqual([frame]);
+    expect(written).toEqual(['\r', frame]);
     expect(pty.pasteText).not.toHaveBeenCalled();
     expect(pty.sendSpecialKeys).not.toHaveBeenCalled();
   });
