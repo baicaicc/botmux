@@ -430,6 +430,15 @@ describe('BOTMUX_REQUIRED_SCOPES', () => {
     expect(names).toContain('contact:user.base:readonly');
   });
 
+  it('requires im:message.p2p_msg:readonly so user DMs reach the bot', () => {
+    // 缺它时用户私聊 bot 的消息不会投递到 WSClient，且没有替代 scope。此前它只在
+    // lark-scopes.json 创建申请集里、不在核验集里——应用真缺它时 setup 回读与启动
+    // 自检都不会报警。锁死：单聊接收必须 critical。
+    const entry = BOTMUX_REQUIRED_SCOPES.find(s => s.name === 'im:message.p2p_msg:readonly');
+    expect(entry, 'im:message.p2p_msg:readonly should be in BOTMUX_REQUIRED_SCOPES').toBeDefined();
+    expect(entry?.critical).toBe(true);
+  });
+
   it('requires im:message.group_msg so the bot can fetch group history (botmux history)', () => {
     // 没有这个 scope 时 listChatMessages 拿不到群里非 @bot 的历史消息，
     // botmux history 失效。标 critical 是为了让启动自检在它缺失时也会 DM

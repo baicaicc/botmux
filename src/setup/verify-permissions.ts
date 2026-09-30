@@ -68,6 +68,12 @@ export function isScopeGranted(name: string, granted: ReadonlySet<string>): bool
 export const BOTMUX_REQUIRED_SCOPES: RequiredScope[] = [
   { name: 'im:message', desc: '收发消息', critical: true },
   { name: 'im:message.group_at_msg:readonly', desc: '群消息接收', critical: true },
+  // 用户→bot 单聊（P2P DM）的接收。缺它时用户私聊 bot 的消息不会经 im.message.receive_v1
+  // 投递到 WSClient，且没有替代 scope（im:message 只覆盖发送；group_* 只覆盖群）。单聊与
+  // 群消息接收同级、都是核心入口，标 critical：新 bot 缺它时 setup 回读不 ready、启动
+  // 自检直接 DM 管理员。此前该 scope 只在 lark-scopes.json 创建申请集里、不在核验集里，
+  // 出现缺口时不会有任何告警（2026-09-30 排查确认现有应用实际都已授权）。
+  { name: 'im:message.p2p_msg:readonly', desc: '单聊消息接收（用户私聊 bot）', critical: true },
   // 没有这个 scope，listChatMessages（container_id_type=chat）只能拿到 @bot 的
   // 消息，拉不到群里的全量历史，botmux history / 群上下文回溯失效。标 critical 是
   // 为了让启动自检在它缺失时也会 DM 管理员——非 critical 的缺失只在同时缺别的
