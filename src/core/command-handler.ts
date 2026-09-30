@@ -8,6 +8,7 @@ import { createHash } from 'node:crypto';
 import { join, resolve, basename } from 'node:path';
 import { config } from '../config.js';
 import { buildTerminalUrl } from './terminal-url.js';
+import { approveTerminalDevice, terminalDeviceStoreForBot } from './terminal-device-pairing.js';
 import { getBot, getAllBots, getBotOpenId, getOwnerOpenId, findOncallChat, effectiveDefaultWorkingDir, type BotConfig } from '../bot-registry.js';
 import { unauthorizedOutcomeFor, triggerUserAuthApplies } from '../services/trigger-user-auth.js';
 import { beginBytedcliLogin, completeBytedcliLogin, pendingBytedcliChallenge, hasBytedcliHome } from '../services/bytedcli-auth.js';
@@ -1695,7 +1696,7 @@ export async function handleTermLinkCommand(
   larkAppId: string,
   chatId: string,
   senderOpenId: string | undefined,
-  _content: string,
+  content: string,
   deps: CommandHandlerDeps,
 ): Promise<void> {
   const loc = localeForBot(larkAppId);
@@ -1715,6 +1716,24 @@ export async function handleTermLinkCommand(
     await reply(t('cmd.term.no_session', undefined, loc));
     return;
   }
+
+  const pairing = content.trim().match(/^\/term\s+pair\s+([A-Z2-9]{8})$/i);
+  if (pairing) {
+    const result = approveTerminalDevice({ larkAppId, sessionId: ds.session.sessionId, code: pairing[1].toUpperCase(), operatorId: senderOpenId });
+    await reply(result.message);
+    return;
+  }
+  if (/^\/term\s+unpair\s*$/i.test(content.trim())) {
+    if (senderOpenId !== getOwnerOpenId(larkAppId)) { await reply('只有当前 Bot 的所有者可以撤销会话设备授权。'); return; }
+    try {
+      const store = terminalDeviceStoreForBot(larkAppId);
+      if (!store) { await reply('当前入口尚未开启设备配对。'); return; }
+      store.revokeSession({ sessionId: ds.session.sessionId, ownerId: senderOpenId });
+      await reply('当前会话的设备授权已撤销；已有网页连接会断开。可从 Lark 新链接重新授权。');
+    } catch { await reply('设备授权暂时不可用，请稍后重试。'); }
+    return;
+  }
+  if (/^\/term\s+\S+/i.test(content.trim())) { await reply('用 /term 取得操作链接，/term pair <配对码> 确认设备，/term unpair 撤销当前会话的设备授权。'); return; }
 
   const channel = await deliverWritableTerminalCardTo(ds, senderOpenId);
   if (channel === 'unsupported') {

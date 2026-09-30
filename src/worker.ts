@@ -18829,6 +18829,7 @@ ${loginUrl ? `<a id="login-banner" href="${loginUrl}" target="_top" rel="noopene
   </div>
 </form>
 <div id="status" class="err">connecting...</div>
+${process.env.BOTMUX_TERMINAL_DEVICE_PAIRING === '1' ? '<a id="device-authorization" href="./_device/settings" style="position:fixed;right:8px;top:8px;z-index:60;color:#ddd;background:#222;padding:4px 8px;border-radius:6px;text-decoration:none">设备授权</a>' : ''}
 <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5/lib/xterm.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0/lib/addon-fit.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-web-links@0/lib/addon-web-links.min.js"></script>
@@ -18836,6 +18837,7 @@ ${loginUrl ? `<a id="login-banner" href="${loginUrl}" target="_top" rel="noopene
 <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-webgl@0/lib/addon-webgl.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-canvas@0/lib/addon-canvas.min.js"></script>
 <script>
+var deviceAuthorization=document.getElementById('device-authorization');if(deviceAuthorization){deviceAuthorization.href='./_device/settings?access='+(new URLSearchParams(location.search).get('access')==='write'?'write':'read');}
 var isTouch='ontouchstart'in window||navigator.maxTouchPoints>0;
 if(isTouch){document.body.classList.add('touch');}
 var hasToken=${hasWrite};

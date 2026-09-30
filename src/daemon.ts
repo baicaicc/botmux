@@ -213,6 +213,10 @@ import { stagePendingRepoSetup, persistPendingRepoCardMessageId } from './core/p
 import { hasPendingSessionTurns, runSessionTurn } from './core/session-turn-queue.js';
 import { buildTerminalUrl, setTerminalProxyPort, setTerminalExternalPort } from './core/terminal-url.js';
 import { startTerminalProxy, type TerminalProxyHandle } from './core/terminal-proxy.js';
+import { TerminalDeviceGateway } from './core/terminal-device-gateway.js';
+import { terminalDeviceStoreForBot, buildTerminalDevicePairingCard } from './core/terminal-device-pairing.js';
+import { loadDashboardSecret } from './dashboard/auth.js';
+import { deriveTerminalWriteToken } from './core/terminal-write-auth.js';
 import type { CliId } from './adapters/cli/types.js';
 import { runtimeInstallationKey } from './adapters/cli/runtime.js';
 import * as scheduler from './core/scheduler.js';
@@ -26352,9 +26356,31 @@ export async function startDaemon(botIndex?: number): Promise<void> {
   const terminalProxyHost = coreOnly ? '127.0.0.1' : config.web.host;
   let terminalProxy: TerminalProxyHandle | null = null;
   try {
+    const deviceStore = terminalDeviceStoreForBot(cfg.larkAppId);
+    const deviceGateway = deviceStore ? new TerminalDeviceGateway({
+      store: deviceStore,
+      cookieName: `__Host-botmux_terminal_device_${createHash('sha256').update(cfg.larkAppId).digest('hex').slice(0, 12)}`,
+      origin: process.env.BOTMUX_PUBLIC_URL ?? '',
+      secret: () => loadDashboardSecret(join(homedir(), '.botmux', '.dashboard-secret')),
+      session: sessionId => {
+        const ds = [...activeSessions.values()].find(current => current.larkAppId === cfg.larkAppId
+          && current.session.sessionId === sessionId && current.session.status === 'active' && sessionSupportsWebTerminal(current));
+        const ownerId = ds && getOwnerOpenId(ds.larkAppId);
+        if (!ds || !ownerId) return null;
+        const secret = loadDashboardSecret(join(homedir(), '.botmux', '.dashboard-secret'));
+        return { ownerId, writeToken: ds.workerToken ?? (secret ? deriveTerminalWriteToken(secret, sessionId) : null), viewToken: ds.workerViewToken ?? null };
+      },
+      notifyPairing: async (sessionId, code, scope) => {
+        const ds = [...activeSessions.values()].find(current => current.larkAppId === cfg.larkAppId && current.session.sessionId === sessionId);
+        const ownerId = ds && getOwnerOpenId(ds.larkAppId);
+        if (!ds || !ownerId) throw new Error('terminal pairing owner unavailable');
+        await sendUserMessage(ds.larkAppId, ownerId, buildTerminalDevicePairingCard({ rootId: sessionAnchorId(ds), sessionId, code, scope }), 'interactive');
+      },
+    }) : undefined;
     terminalProxy = await startTerminalProxy({
       port: proxyPort,
       host: terminalProxyHost,
+      ...(deviceGateway ? { authorizeRequest: request => deviceGateway.authorize(request) } : {}),
       resolvePort: (sessionId) => {
         for (const ds of activeSessions.values()) {
           if (ds.session.sessionId === sessionId && sessionSupportsWebTerminal(ds) && ds.workerPort) {
@@ -26393,6 +26419,9 @@ export async function startDaemon(botIndex?: number): Promise<void> {
     setTerminalProxyPort(terminalProxy.port);
     logger.info(`[terminal-proxy] listening on ${terminalProxyHost}:${terminalProxy.port} (bot ${idx}) — session terminals at /s/{sessionId}`);
   } catch (err) {
+    if (process.env.BOTMUX_TERMINAL_DEVICE_PAIRING === '1') {
+      throw new Error('terminal device gateway unavailable; refusing unguarded terminal links');
+    }
     logger.error(`[terminal-proxy] failed to bind port ${proxyPort} — falling back to direct worker ports for terminal links: ${(err as Error).message}`);
   }
 
