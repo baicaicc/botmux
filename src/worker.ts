@@ -13,6 +13,7 @@ import { clearBotmuxPromptEnv } from './skills/zero-injection.js';
 import { claudeDataDirForPid } from './services/claude-data-dir.js';
 import { codebuddySession } from './services/codebuddy-transcript.js';
 import { codebuddyActionPrompt } from './services/codebuddy-action-prompt.js';
+import { KimiNativeFailureObserver } from './services/kimi-native-failure.js';
 /**
  * Worker process: manages a single CLI PTY session + web terminal.
  * Forked by the daemon, communicates via Node.js IPC.
@@ -4512,6 +4513,39 @@ const inflightInputs = new InflightInputTracker();
  *  start work before their history/transcript submit marker is observable. */
 let lastPtyActivityAtMs = 0;
 let currentBotmuxTurnId: string | undefined;
+const kimiNativeFailureObserver = new KimiNativeFailureObserver();
+let kimiFailureGeneration: {backend: HerdrBackend; generation: number} | undefined;
+
+function markKimiNativeTurn(content: string, turnId?: string, dispatchAttempt?: number): void {
+  kimiNativeFailureObserver.clear();
+  kimiFailureGeneration = undefined;
+  if (lastInitConfig?.cliId !== 'kimi' || !(backend instanceof HerdrBackend) || !turnId) return;
+  const source = backend.getKimiNativeSource();
+  if (!source) return;
+  kimiNativeFailureObserver.mark(source, {content, turnId, dispatchAttempt});
+  if (kimiNativeFailureObserver.active) kimiFailureGeneration = {backend, generation: cliSpawnGeneration};
+}
+
+function checkKimiNativeFailure(): void {
+  if (!kimiNativeFailureObserver.active) return;
+  const fence = kimiFailureGeneration;
+  if (!fence || backend !== fence.backend || cliSpawnGeneration !== fence.generation || cliRestartInProgress) {
+    kimiNativeFailureObserver.clear();
+    return;
+  }
+  const source = fence.backend.getKimiNativeSource();
+  const failure = kimiNativeFailureObserver.poll(source);
+  if (!failure || !source) return;
+  const fresh = fence.backend.getKimiNativeSource();
+  if (!fresh || JSON.stringify(fresh) !== JSON.stringify(source) || backend !== fence.backend
+    || cliSpawnGeneration !== fence.generation || failure.turnId !== currentBotmuxTurnId
+    || failure.dispatchAttempt !== currentBotmuxDispatchAttempt) return;
+  send({type: 'final_output', content: failedBridgeFailureText(failure.errorCode, failure.summary),
+    lastUuid: `kimi-${source.sessionId}-${failure.turnId}`, turnId: failure.turnId,
+    ...(failure.dispatchAttempt !== undefined ? {dispatchAttempt: failure.dispatchAttempt} : {}), turnFailed: true});
+  emitTurnTerminal(failure.turnId, 'failed', failure.errorCode, failure.dispatchAttempt,
+    undefined, failure.retryable, failure.completedAtMs);
+}
 let currentBotmuxDispatchAttempt: number | undefined;
 let currentBotmuxLinkRefMode: 'observe' | 'enabled' | undefined;
 const frozenTurnLinkRefModes = new Map<string, 'disabled' | 'observe' | 'enabled'>();
@@ -16697,6 +16731,7 @@ function markPromptReady(): void {
     log('Ignoring prompt-ready while a recovered remote turn is still active');
     return;
   }
+  checkKimiNativeFailure();
   if (bareShellLaunchBlocked) {
     log('Ignoring non-PTY prompt-ready while bare-shell launch block is active');
     return;
@@ -18243,6 +18278,7 @@ async function flushPending(): Promise<void> {
         // real completedAtMs (the failure instant), just no durationMs. Arming
         // here also keeps queueing time out of the span.
         markTurnExecutionStart(item.turnId, item.dispatchAttempt);
+        markKimiNativeTurn(msg, item.turnId, item.dispatchAttempt);
         if (isCodexAppCliId(lastInitConfig?.cliId)) {
           log(
             `Writing Codex App input to PTY (flush): `
@@ -19074,6 +19110,7 @@ function startScreenUpdates(): void {
   screenUpdateTimer = setInterval(() => {
     const capacityBackend = backend;
     const capacityGeneration = cliSpawnGeneration;
+    checkKimiNativeFailure();
     if (awaitingFirstPrompt) {
       inspectAidenCodexUpdateDialogOnScreen();
       if (renderer) observeTraexAutoModelCapacity(renderer.rawSnapshot());
@@ -19239,6 +19276,8 @@ function startScreenUpdates(): void {
 }
 
 function stopScreenUpdates(): void {
+  kimiNativeFailureObserver.clear();
+  kimiFailureGeneration = undefined;
   if (screenUpdateTimer) { clearInterval(screenUpdateTimer); screenUpdateTimer = null; }
   if (renderer) { renderer.dispose(); renderer = null; }
   lastAnalyzerSnapshot = '';

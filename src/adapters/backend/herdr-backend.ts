@@ -1,6 +1,7 @@
 import {HerdrSharedInput} from './herdr-shared-input.js';
 import type {HerdrWebTarget} from '../../utils/herdr-web-stream.js';
 import {codebuddySession} from '../../services/codebuddy-transcript.js';
+import {inspectHerdrKimiSource, type KimiNativeSource} from '../../services/kimi-native-failure.js';
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -999,6 +1000,11 @@ export class HerdrBackend implements SessionBackend {
     if (candidates.length !== 1) return null;
     this.cliPid = candidates[0].pid;
     return this.cliPid ?? null;
+  }
+
+  getKimiNativeSource(): KimiNativeSource | undefined {
+    if (this.exited) return;
+    return inspectHerdrKimiSource(this.sessionName, this.agentName, this.cliPid);
   }
 
   getAttachInfo() {
