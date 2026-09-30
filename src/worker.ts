@@ -2260,7 +2260,11 @@ function resolveTerminalAccessForReq(req: IncomingMessage, url: URL): WorkerTerm
   return {
     hasRead: true,
     hasWrite: grant.claims.scope === 'write',
-    platformReadonly: grant.claims.scope === 'read',
+    // Device-paired readers already approved their identity in Lark. Their
+    // view link stays read-only and uses the normal read-only banner; the
+    // platform owner-login banner applies only to central dashboard grants.
+    // This display hint is considered only after the signed grant verified.
+    platformReadonly: grant.claims.scope === 'read' && req.headers['x-botmux-terminal-device'] !== '1',
     auditUser: grant.claims.userId,
     controlExpiresAt: grant.claims.expiresAt,
   };
