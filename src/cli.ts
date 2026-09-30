@@ -94,6 +94,11 @@ import {
   type SetupOpenPlatformOutcome,
 } from './setup/open-platform-outcome.js';
 import {
+  configureLarkPermissionReadiness,
+  readSetupPermissionReadiness,
+  setupPermissionBlockedMessage,
+} from './setup/permission-readiness.js';
+import {
   buildBotFromAddFlags,
   editInputFromFlags,
   isScriptedSetupInvocation,
@@ -1649,7 +1654,7 @@ function botJsonView(bot: Record<string, any>, index: number): Record<string, an
  * 的老姿势在问题序列变化时会静默错位）。校验口径与 TUI 一致：目录存在性、
  * owner 必填、凭证变更时的 tenant_access_token 校验，任一失败不写盘。
  */
-async function cmdSetupScripted(
+export async function cmdSetupScripted(
   argv: string[],
   cloneSource?: Record<string, any>,
 ): Promise<void> {
@@ -1690,12 +1695,18 @@ async function cmdSetupScripted(
     }
     const bot = bots[index];
     const processName = botProcessName(bot, index, PM2_NAME);
-    const openPlatform = await finishOpenPlatformSetup(bot.larkAppId, botBrand(bot), {
+    const permissionBot = { larkAppId: bot.larkAppId, larkAppSecret: bot.larkAppSecret, brand: botBrand(bot) };
+    const openPlatform: SetupOpenPlatformOutcome = botBrand(bot) === 'lark'
+      ? { status: 'skipped' }
+      : await finishOpenPlatformSetup(bot.larkAppId, botBrand(bot), {
       // Machine-readable callers must never be surprised by an interactive QR.
       reuseOnly: cmd.json && !cmd.switchAccount,
       forceQrLogin: cmd.switchAccount,
       quiet: cmd.json,
     });
+    const permissions = botBrand(bot) === 'lark'
+      ? await configureLarkPermissionReadiness(permissionBot, { json: cmd.json })
+      : await readSetupPermissionReadiness(permissionBot);
     if (openPlatform.status === 'failed' || openPlatform.status === 'manual') {
       const continueCommand = setupOpenPlatformRetryCommand(bot.larkAppId, openPlatform);
       const next = continueCommand ?? 'manual_open_platform_setup';
@@ -1710,10 +1721,21 @@ async function cmdSetupScripted(
           bot: botJsonView(bot, index),
           appId: bot.larkAppId,
           openPlatform: setupOpenPlatformOutcomeJson(openPlatform),
+          permissions,
           ...(continueCommand ? { continueCommand } : {}),
           next,
         },
       );
+      return;
+    }
+    if (permissions.status !== 'ready') {
+      failSetupScripted(cmd.json, setupPermissionBlockedMessage(permissions), {
+        partial: true, action: 'configure', bot: botJsonView(bot, index), appId: bot.larkAppId,
+        openPlatform: setupOpenPlatformOutcomeJson(openPlatform), permissions,
+        continueCommand: permissions.continueCommand,
+        live: { ok: false, reason: 'permissions_incomplete', message: '关键权限未确认生效，未启动新机器人' },
+        next: permissions.continueCommand,
+      });
       return;
     }
     const live = await ensureBotDaemonStarted(bot.larkAppId, { quiet: cmd.json });
@@ -1725,11 +1747,12 @@ async function cmdSetupScripted(
         bot: botJsonView(bot, index),
         appId: bot.larkAppId,
         openPlatform: setupOpenPlatformOutcomeJson(openPlatform),
+        permissions,
         live,
         next,
       }, null, 2));
     } else {
-      console.log(`✅ 已完成 ${processName} (${bot.larkAppId}) 的开放平台配置`);
+      console.log(`✅ ${processName} (${bot.larkAppId}) 的关键权限已确认生效`);
       if (live.ok) console.log(`✅ 已自动上线（${live.processName}）`);
       else if (live.reason === 'fleet_down') console.log('下一步: botmux start（daemon 尚未运行）');
       else console.log(`⚠️  自动上线失败（${live.message}）。下一步: botmux restart`);
@@ -2023,7 +2046,7 @@ async function cmdSetupScripted(
 
     // 已有凭证模式默认跳过；--create-app 默认开启并复用刚才的 Web session。
     let openPlatform: SetupOpenPlatformOutcome = { status: 'skipped' };
-    if (cmd.openPlatformAuto) {
+    if (cmd.openPlatformAuto && botBrand(bot) !== 'lark') {
       openPlatform = await finishOpenPlatformSetup(bot.larkAppId, botBrand(bot), {
         reuseOnly: scriptedSetupOpenPlatformReuseOnly({
           json: cmd.json,
@@ -2039,6 +2062,9 @@ async function cmdSetupScripted(
     }
 
     const index = existing.length;
+    const permissions = await readSetupPermissionReadiness({
+      larkAppId: bot.larkAppId, larkAppSecret: bot.larkAppSecret, brand: botBrand(bot),
+    });
     if (blocksSetupBotStart(openPlatform)) {
       const continueCommand = setupOpenPlatformRetryCommand(bot.larkAppId, openPlatform)!;
       failSetupScripted(
@@ -2053,6 +2079,7 @@ async function cmdSetupScripted(
           botsFile: BOTS_JSON_FILE,
           envMigrated: migratedEnv || undefined,
           openPlatform: setupOpenPlatformOutcomeJson(openPlatform),
+          permissions,
           continueCommand,
           live: {
             ok: false,
@@ -2062,6 +2089,18 @@ async function cmdSetupScripted(
           next: continueCommand,
         },
       );
+      return;
+    }
+    if (permissions.status !== 'ready') {
+      failSetupScripted(cmd.json, setupPermissionBlockedMessage(permissions), {
+        partial: true, action: 'add', bot: botJsonView(bot, index), appId: bot.larkAppId,
+        ...(createdAppName ? { appName: createdAppName } : {}),
+        botsFile: BOTS_JSON_FILE, envMigrated: migratedEnv || undefined,
+        openPlatform: setupOpenPlatformOutcomeJson(openPlatform), permissions,
+        continueCommand: permissions.continueCommand,
+        live: { ok: false, reason: 'permissions_incomplete', message: '关键权限未确认生效，未启动新机器人' },
+        next: permissions.continueCommand,
+      });
       return;
     }
     // daemon 在跑就直接把新 bot 那一个进程拉起来，免整组 botmux restart。
@@ -2077,6 +2116,7 @@ async function cmdSetupScripted(
         botsFile: BOTS_JSON_FILE,
         envMigrated: migratedEnv || undefined,
         openPlatform: setupOpenPlatformOutcomeJson(openPlatform),
+        permissions,
         live,
         next,
       }, null, 2));
@@ -3108,7 +3148,16 @@ async function cmdStopBot(argv: string[]): Promise<void> {
 /** Print the post-add "next step" line for interactive setup: auto-start the new
  *  bot's own daemon when the fleet is up (no fleet-wide restart), else fall back
  *  to the botmux start / restart hint. */
-async function printAddBotLiveHint(appId: string): Promise<void> {
+export async function printAddBotLiveHint(appId: string): Promise<void> {
+  const bot = loadBotsJson().find(current => current?.larkAppId === appId);
+  if (!bot) { console.error(`❌ AppID ${appId} 不在机器人配置中。`); return; }
+  const permissions = await readSetupPermissionReadiness({
+    larkAppId: bot.larkAppId, larkAppSecret: bot.larkAppSecret, brand: botBrand(bot),
+  });
+  if (permissions.status !== 'ready') {
+    console.error(`⚠️ ${setupPermissionBlockedMessage(permissions)}`);
+    return;
+  }
   const live = await ensureBotDaemonStarted(appId);
   if (live.ok) {
     console.log(`✅ 已自动上线（${live.processName}），无需重启其它机器人。\n`);

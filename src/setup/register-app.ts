@@ -11,14 +11,14 @@
  * 注意:
  * - 这个端点 archetype 写死 `PersonalAgent`, 但实测 PersonalAgent 应用是
  *   可以挂 bot 能力的 (`zarazhangrui/feishu-claude-code-bridge` 在用).
- * - 建出来的应用 **没有** 声明 botmux 需要的 scope, 用户仍要在开放平台
- *   「权限管理 → 批量导入/导出权限」粘贴 ~/.botmux/lark-scopes.json (setup
- *   末尾会自动写一份) 一次性提交审批. 事件订阅 + bot 能力维护者实测默认
- *   配好, 收不到消息时见 README 的 fallback 自查清单.
+ * - 创建时通过 SDK addons 同时申请核心权限、消息事件与卡片回调。平台可能
+ *   忽略租户不支持的名称，所以调用方仍须回读生效权限后才能自动上线。
+ * - 指定 appId 时更新原应用，只提交给定的缺失权限；不会创建替代应用。
  * - secret 永远不打印; 错误只暴露 error code / 阶段标签, 不暴露 secret.
  */
 import { registerApp } from '@larksuiteoapi/node-sdk';
 import qrcode from 'qrcode-terminal';
+import { BOTMUX_REQUIRED_SCOPES, BOTMUX_MESSAGE_NARROW_SCOPES } from './verify-permissions.js';
 
 export type RegisterBrand = 'feishu' | 'lark';
 
@@ -53,6 +53,10 @@ export type RegisterAppErr = {
 export type RegisterAppResult = RegisterAppOk | RegisterAppErr;
 
 export interface RegisterAppOptions {
+  /** Existing app to update. Omit only when creating a new app. */
+  appId?: string;
+  /** Exact missing scope names for an existing-app repair. */
+  scopeNames?: string[];
   /** 取消信号 (Ctrl-C 时填充). */
   signal?: AbortSignal;
   /**
@@ -61,6 +65,25 @@ export interface RegisterAppOptions {
   onQRCodeReady?: (info: { url: string; expireIn: number }) => void;
   /** 状态变更回调, 主要用于"已切换到 Lark 域名"提示. */
   onStatusChange?: (info: { status: string; interval?: number }) => void;
+}
+
+/** Keep registration tied to the same core capabilities as startup checks. */
+export function buildRegistrationAddons(scopeNames?: string[]) {
+  const requested = scopeNames ?? [
+    ...BOTMUX_REQUIRED_SCOPES.filter(scope => scope.critical).map(scope => scope.name),
+    'contact:user.id:readonly', // Resolve configured owner email/phone in this app.
+    'application:application:self_manage', // Read back effective permissions.
+  ];
+  const tenant = [...new Set(requested.flatMap(name =>
+    name === 'im:message' ? [...BOTMUX_MESSAGE_NARROW_SCOPES] : [name],
+  ))];
+  return {
+    scopes: { tenant, user: [] as string[] },
+    ...(scopeNames === undefined ? {
+      events: { items: { tenant: ['im.message.receive_v1'] } },
+      callbacks: { items: ['card.action.trigger'] },
+    } : {}),
+  };
 }
 
 function defaultPrintQRCode(info: { url: string; expireIn: number }): void {
@@ -93,9 +116,15 @@ export async function tryRegisterApp(opts: RegisterAppOptions = {}): Promise<Reg
     const result = await registerApp({
       signal: opts.signal,
       source: 'botmux',
+      addons: buildRegistrationAddons(opts.scopeNames),
+      ...(opts.appId ? { appId: opts.appId, createOnly: false } : { createOnly: true }),
       onQRCodeReady: onQR,
       onStatusChange: onStatus,
     });
+
+    if (opts.appId && result.client_id !== opts.appId) {
+      return { ok: false, error: 'unknown', message: '授权结果不是指定的原应用；未替换 Bot 配置，请核对原授权请求。' };
+    }
 
     if (!result.client_id || !result.client_secret) {
       return {
