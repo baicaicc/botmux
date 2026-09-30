@@ -56,23 +56,19 @@ export function createKimiAdapter(pathOverride?: string): CliAdapter {
     resumeRequiresCliSessionId: true,
 
     async writeInput(pty: PtyHandle, content: string) {
-      try {
-        if (!kimiFirstWriteSeen.has(pty)) {
-          kimiFirstWriteSeen.add(pty);
-          await delay(KIMI_FIRST_WRITE_SETTLE_MS);
-        }
-        if (pty.pasteText && pty.sendSpecialKeys) {
-          pty.pasteText(content);
-          await delay(200);
-          pty.sendSpecialKeys('Enter');
-        } else {
-          const pasted = `${BRACKETED_PASTE_START}${content}${BRACKETED_PASTE_END}`;
-          pty.write(pasted);
-          await delay(1000);
-          pty.write('\r');
-        }
-      } catch {
-        return;
+      if (!kimiFirstWriteSeen.has(pty)) {
+        kimiFirstWriteSeen.add(pty);
+        await delay(KIMI_FIRST_WRITE_SETTLE_MS);
+      }
+      // HERDR's pasteText sends bare text. Kimi's pi-tui needs a complete
+      // bracketed paste to reset its paste-burst detector before Enter; without
+      // that boundary it can turn Enter into a newline. Keep text and submit
+      // in one ordered write rather than timing two independent commands.
+      const written = pty.write(`${BRACKETED_PASTE_START}${content}${BRACKETED_PASTE_END}\r`);
+      if (written === false) {
+        // The write may have reached the CLI. Let the worker's existing
+        // ambiguous-write path report it instead of silently succeeding.
+        throw new Error('Kimi input write was not confirmed; delivery is ambiguous.');
       }
     },
 
