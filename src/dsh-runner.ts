@@ -34,6 +34,7 @@ import { join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { parse as parseYaml } from 'yaml';
 import { RunnerControlWriter } from './adapters/cli/runner-control-channel.js';
+import { runDshLiveRunnerMain } from './dsh-live-runner.js';
 
 const DSH_MARKER = '::botmux-dsh:';
 const DEFAULT_TURN_TIMEOUT_MS = 10 * 60 * 1000;
@@ -935,9 +936,14 @@ async function main(): Promise<void> {
   prompt();
 }
 
-process.on('SIGTERM', () => process.exit(0));
-
-main().catch(err => {
+// Explicit per-bot connection selects the official Web owner's existing
+// session. The default SDK runner retains its original launch behavior.
+const liveConnectionFile = process.env.DSH_LIVE_CONNECTION_FILE?.trim();
+if (!liveConnectionFile) process.on('SIGTERM', () => process.exit(0));
+const running = liveConnectionFile
+  ? runDshLiveRunnerMain([...process.argv.slice(2), '--connection-file', liveConnectionFile])
+  : main();
+running.catch(err => {
   output.error(`dsh runner failed: ${errorMessage(err)}\n`);
   process.exit(1);
 });
