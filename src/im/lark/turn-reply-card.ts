@@ -295,9 +295,9 @@ export function buildTurnReplyCard(record: TurnReplyCardRecord, presentation: Tu
   return serialized;
 }
 
-export function replyCardPresentation(config: Pick<BotConfig, 'thinkingCard' | 'thinkingCardToolResult' | 'noCotChats' | 'hiddenStreamingCardButtons'>, chatId: string): Pick<TurnReplyCardPresentation, 'showProcess' | 'showToolResults' | 'canStop'> {
+export function replyCardPresentation(config: Pick<BotConfig, 'cotEnabled' | 'thinkingCardToolResult' | 'noCotChats' | 'hiddenStreamingCardButtons'>, chatId: string): Pick<TurnReplyCardPresentation, 'showProcess' | 'showToolResults' | 'canStop'> {
   return {
-    showProcess: config.thinkingCard !== false && !config.noCotChats?.includes(chatId),
+    showProcess: config.cotEnabled !== false && !config.noCotChats?.includes(chatId),
     showToolResults: config.thinkingCardToolResult !== false,
     canStop: !config.hiddenStreamingCardButtons?.includes('stop'),
   };

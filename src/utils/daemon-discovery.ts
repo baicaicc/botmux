@@ -23,6 +23,10 @@ export interface OnlineDaemonInfo {
   bootInstanceId?: string;
   /** Auth protocol advertised atomically with bootInstanceId + ipcPort. */
   workflowIpcProtocol?: string;
+  /** Presence-based session-store capability. Copy only; never a write permit. */
+  sessionStoreProtocol?: string;
+  /** Running binary version. Copy only; never compared by size. */
+  botmuxVersion?: string;
   botName?: string;
   cliId?: string;
   pid?: number;
@@ -63,12 +67,19 @@ export function resolveDaemonIpcPort(
 }
 
 /** Read descriptors without treating stale heartbeat records as live daemons. */
-export function listDaemonDescriptors(dataDir?: string): OnlineDaemonInfo[] {
+/** `strict`: an unlistable registry dir throws instead of reading as "nobody
+ *  online" — for callers that must not mistake an unreadable registry for an
+ *  empty one. Malformed individual descriptors are skipped either way. */
+export function listDaemonDescriptors(dataDir?: string, opts: { strict?: boolean } = {}): OnlineDaemonInfo[] {
   const dir = registryDir(dataDir);
-  if (!existsSync(dir)) return [];
+  // No existsSync pre-check: it also answers false on EACCES, which strict
+  // mode must surface. A registry that was never created (ENOENT) is empty.
   const out: OnlineDaemonInfo[] = [];
   let names: string[] = [];
-  try { names = readdirSync(dir); } catch { return []; }
+  try { names = readdirSync(dir); } catch (err) {
+    if (opts.strict && (err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+    return [];
+  }
   for (const f of names) {
     if (!f.endsWith('.json')) continue;
     try {
@@ -84,6 +95,12 @@ export function listDaemonDescriptors(dataDir?: string): OnlineDaemonInfo[] {
         ...(typeof d.workflowIpcProtocol === 'string' && d.workflowIpcProtocol
           ? { workflowIpcProtocol: d.workflowIpcProtocol }
           : {}),
+        ...(typeof d.sessionStoreProtocol === 'string' && d.sessionStoreProtocol
+          ? { sessionStoreProtocol: d.sessionStoreProtocol }
+          : {}),
+        ...(typeof d.botmuxVersion === 'string' && d.botmuxVersion
+          ? { botmuxVersion: d.botmuxVersion }
+          : {}),
         ...(typeof d.botName === 'string' && d.botName.trim() ? { botName: d.botName.trim() } : {}),
         ...(typeof d.cliId === 'string' && d.cliId.trim() ? { cliId: d.cliId.trim() } : {}),
         pid: d.pid,
@@ -97,9 +114,9 @@ export function listDaemonDescriptors(dataDir?: string): OnlineDaemonInfo[] {
 }
 
 /** List every daemon whose descriptor file is fresh (heartbeat within STALE_MS). */
-export function listOnlineDaemons(dataDir?: string): OnlineDaemonInfo[] {
+export function listOnlineDaemons(dataDir?: string, opts: { strict?: boolean } = {}): OnlineDaemonInfo[] {
   const now = Date.now();
-  return listDaemonDescriptors(dataDir).filter(d => now - (d.lastHeartbeat ?? 0) <= DAEMON_HEARTBEAT_STALE_MS);
+  return listDaemonDescriptors(dataDir, opts).filter(d => now - (d.lastHeartbeat ?? 0) <= DAEMON_HEARTBEAT_STALE_MS);
 }
 
 /** Find a specific online daemon by larkAppId. Returns null if offline / not found. */

@@ -2,6 +2,7 @@ import { store } from './store.js';
 import type { CliRuntimeConfig as SharedCliRuntimeConfig } from '../../adapters/cli/runtime.js';
 import type { FeedbackPolicyLayer } from '../../services/feedback-policy-resolver.js';
 import type { ReplyStyleConfig } from '../../im/lark/reply-card-style.js';
+import type { AskOptionLayout } from '../../im/lark/ask-option-layout.js';
 import type { CodexReasoningEffort } from '../../services/codex-reasoning-effort.js';
 import type { StreamingCardButtonId } from '../../im/lark/streaming-card-buttons.js';
 
@@ -90,7 +91,19 @@ export type BotDefaultsRow = {
   brandLabel?: string | null;
   /** Sparse per-bot reply-card style override; null means all built-in defaults. */
   replyStyle?: ReplyStyleConfig | null;
+  /** Per-bot ask option layout; null means the built-in compact default. */
+  askOptionLayout?: AskOptionLayout | null;
   sandbox?: boolean;
+  /** Tri-state sandbox selection ('off' absent historically → derive from sandbox). */
+  sandboxMode?: 'off' | 'oncall' | 'scratch' | null;
+  scratchStorage?: 'tmpfs' | 'disk' | null;
+  /** Whether the tmpfs/disk storage segmented control applies (Linux only;
+   *  macOS scratch is always APFS-clonefile backed). */
+  scratchStorageSelectable?: boolean;
+  scratchTmpfsSizeMb?: number | null;
+  scratchDenyPaths?: string[] | null;
+  /** Whether the scratch mode is available on this platform (Linux only). */
+  scratchSupported?: boolean;
   codexAuthSync?: 'shared' | 'isolated';
   /** Trigger-user CLI auth: null / absent = off (the historical behavior, where
    *  CLI calls use whatever identity is logged in on the machine).
@@ -120,14 +133,12 @@ export type BotDefaultsRow = {
   pinStreamingCard?: boolean;
   silentTurnReactions?: boolean;
   codexAppCleanInput?: boolean;
+  codexBrowser?: boolean;
   writableTerminalLinkInCard?: boolean;
   privateCard?: boolean;
   /** Bot-level master switch for the native CoT (thinking process) message.
    *  Default ON — only an explicit false means disabled. */
-  thinkingCard?: boolean;
-  /** 思考气泡是否附带工具输出代码块。默认 ON —— 只有显式 false 表示关闭；
-   *  thinkingCard 关闭时无意义。 */
-  thinkingCardToolResult?: boolean;
+  cotEnabled?: boolean;
   /** Whether each turn carries the `<sender>` speaker tag. Default ON — only an
    *  explicit false means the tag is suppressed. */
   senderTag?: boolean;
@@ -153,6 +164,7 @@ export type BotDefaultsRow = {
   /** 最终回复投递方式的**生效值**（显式配置，否则按 CLI 缺省）。'transcript' = daemon
    *  从 CLI 转写自动取最终回复，模型不再被要求 botmux send；'send' = 模型自己 botmux send。 */
   replyDelivery?: 'send' | 'transcript' | null;
+  promptInjection?: 'default' | 'none';
   /** 当前 cliId 的缺省投递方式；目前统一为 'send'。 */
   replyDeliveryDefault?: 'send' | 'transcript';
   /** 当前 cliId 是否有转写采集通道（claude-code / 结构化转写白名单）；false 时开关禁用。 */
@@ -164,6 +176,7 @@ export type BotDefaultsRow = {
   oncallGroup?: import('../../services/oncall-group-policy.js').OncallGroupPolicy | null;
   docSubscribeDefaultMode?: string;
   maxLiveWorkers?: number | null;
+  idleSuspendMinutes?: number | null;
   logicalSessionCount?: number;
   residentSessionCount?: number;
   dormantSessionCount?: number;
@@ -179,6 +192,8 @@ export type BotDefaultsRow = {
   launchShell?: string;
   env?: string;
   riff?: Record<string, unknown> | null;
+  /** 被动入群时自动把 owner 拉进群。缺省 ON —— 只有显式 false 表示关闭。 */
+  autoInviteOwnerOnGroupAdd?: boolean;
   autoStartOnGroupJoin?: boolean;
   autoStartOnGroupJoinPrompt?: string;
   autoStartOnGroupJoinSeed?: string;
@@ -187,9 +202,11 @@ export type BotDefaultsRow = {
   groupJoinCommandEnabled?: boolean;
   groupJoinCommand?: string;
   autoStartOnNewTopic?: boolean;
+  autoStartExcludedChats?: string[];
   autoGrantRequestCards?: boolean;
   restrictGrantCommands?: boolean;
   p2pOpen?: boolean;
+  grantRequestToOwnerDm?: boolean;
   grantDefaultDurationMs?: number | null;
   messageQuotaDefaultLimit?: number | null;
   skillInjectionSupport?: 'dynamic' | 'global' | 'none' | string;

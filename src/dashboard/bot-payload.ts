@@ -1,11 +1,12 @@
 import { defaultSummaryRangePrefs, summaryRangeFromLegacyContentTriggers } from '../services/summary-range-store.js';
 import { selectionKeyForBot } from '../setup/cli-selection.js';
-import { normalizeUsageDisplay } from '../bot-registry.js';
+import { normalizeUsageDisplay, normalizeCotEnabled } from '../bot-registry.js';
 import { normalizeHiddenStreamingCardButtons } from '../im/lark/streaming-card-buttons.js';
 import type { CliRuntimeConfig } from '../adapters/cli/runtime.js';
 import type { CliLaunchMode } from '../core/cli-launch-mode.js';
 import { GRANT_DURATION_OPTIONS } from '../services/grant-policy.js';
 import { normalizeSparseReplyStyleConfig } from './reply-style.js';
+import { normalizeAskOptionLayout } from '../im/lark/ask-option-layout.js';
 import { parseTriggerUserAuthConfig, type TriggerUserAuthConfig } from '../services/trigger-user-auth.js';
 import type { NativeSubagentRuntimePolicy } from '../services/native-subagent-runtime-policy.js';
 import { normalizeQuotaFallbackBotConfig } from '../services/quota-fallback.js';
@@ -125,7 +126,20 @@ export function botDefaultsPayload(bot: DashboardBotDescriptor, j?: any, error?:
     // Private Bot Defaults payload only. Keep the persisted shape sparse and
     // drop malformed hand edits field-by-field before they reach form state.
     replyStyle: normalizeSparseReplyStyleConfig(j?.replyStyle).config ?? null,
-    sandbox: j?.sandbox === true,
+    // 同上：非法手改值 fail-soft 丢掉，缺省（compact）以 null 表达。
+    askOptionLayout: normalizeAskOptionLayout(j?.askOptionLayout).layout ?? null,
+    sandbox: j?.sandbox === true || j?.sandbox === 'oncall' || j?.sandbox === 'scratch',
+    sandboxMode: j?.sandboxMode === 'off' || j?.sandboxMode === 'oncall' || j?.sandboxMode === 'scratch'
+      ? j.sandboxMode
+      : (j?.sandbox === 'scratch' ? 'scratch' : j?.sandbox === true || j?.sandbox === 'oncall' ? 'oncall' : 'off'),
+    scratchStorage: j?.scratchStorage === 'disk' || j?.scratchStorage === 'tmpfs' ? j.scratchStorage : null,
+    // tmpfs-vs-disk selection exists only on Linux (full-root overlay). On
+    // macOS scratch is always APFS clonefile COW (disk-backed, swap-backed);
+    // the UI hides the storage segmented control there.
+    scratchStorageSelectable: process.platform === 'linux',
+    scratchTmpfsSizeMb: typeof j?.scratchTmpfsSizeMb === 'number' ? j.scratchTmpfsSizeMb : null,
+    scratchDenyPaths: Array.isArray(j?.scratchDenyPaths) ? j.scratchDenyPaths.filter((x: unknown) => typeof x === 'string') : null,
+    scratchSupported: j?.scratchSupported === true,
     sandboxPaths: (j?.sandboxPaths && typeof j.sandboxPaths === 'object' && !Array.isArray(j.sandboxPaths))
       ? {
           readWrite: Array.isArray(j.sandboxPaths.readWrite) ? j.sandboxPaths.readWrite.filter((x: unknown) => typeof x === 'string') : [],
@@ -143,14 +157,16 @@ export function botDefaultsPayload(bot: DashboardBotDescriptor, j?: any, error?:
     pinStreamingCard: j?.pinStreamingCard === true,
     silentTurnReactions: j?.silentTurnReactions === true,
     codexAppCleanInput: j?.codexAppCleanInput === true,
+    codexBrowser: j?.codexBrowser === true
+      || (typeof j?.codexBrowser === 'object' && j.codexBrowser?.enabled === true),
     writableTerminalLinkInCard: j?.writableTerminalLinkInCard === true,
     privateCard: j?.privateCard === true,
-    thinkingCard: j?.thinkingCard !== false,
-    thinkingCardToolResult: j?.thinkingCardToolResult !== false,
+    cotEnabled: normalizeCotEnabled(j),
     senderTag: j?.senderTag !== false,
     overloadAlert: j?.overloadAlert === true,
     botToBotSameDir: j?.botToBotSameDir !== false,
     quotaFallbackBot: normalizeQuotaFallbackBotConfig(j?.quotaFallbackBot, bot.larkAppId).config ?? null,
+    autoInviteOwnerOnGroupAdd: j?.autoInviteOwnerOnGroupAdd !== false,
     autoStartOnGroupJoin: j?.autoStartOnGroupJoin === true,
     autoStartOnGroupJoinPrompt: typeof j?.autoStartOnGroupJoinPrompt === 'string' ? j.autoStartOnGroupJoinPrompt : '',
     autoStartOnGroupJoinSeed: typeof j?.autoStartOnGroupJoinSeed === 'string' ? j.autoStartOnGroupJoinSeed : '',
@@ -158,6 +174,7 @@ export function botDefaultsPayload(bot: DashboardBotDescriptor, j?: any, error?:
     groupJoinCommandEnabled: j?.groupJoinCommandEnabled === true,
     groupJoinCommand: typeof j?.groupJoinCommand === 'string' ? j.groupJoinCommand : '',
     autoStartOnNewTopic: j?.autoStartOnNewTopic === true,
+    autoStartExcludedChats: Array.isArray(j?.autoStartExcludedChats) ? j.autoStartExcludedChats : [],
     summaryRange: j?.summaryRange
       ?? summaryRangeFromLegacyContentTriggers(j?.contentTriggers)
       ?? defaultSummaryRangePrefs(),
@@ -176,6 +193,7 @@ export function botDefaultsPayload(bot: DashboardBotDescriptor, j?: any, error?:
     restrictGrantCommands: j?.restrictGrantCommands === true,
     autoGrantRequestCards: j?.autoGrantRequestCards !== false,
     p2pOpen: j?.p2pOpen === true,
+    grantRequestToOwnerDm: j?.grantRequestToOwnerDm === true,
     grantDefaultDurationMs: typeof j?.grantDefaultDurationMs === 'number'
       && GRANT_DURATION_OPTIONS.includes(j.grantDefaultDurationMs as (typeof GRANT_DURATION_OPTIONS)[number])
       ? j.grantDefaultDurationMs
@@ -184,6 +202,7 @@ export function botDefaultsPayload(bot: DashboardBotDescriptor, j?: any, error?:
     p2pMode: j?.p2pMode === 'thread' ? 'thread' : j?.p2pMode === 'group' ? 'group' : 'chat',
     envelopeInjection: j?.envelopeInjection === 'auto' ? 'auto' : 'off',
     replyDelivery: j?.replyDelivery === 'transcript' ? 'transcript' : 'send',
+    promptInjection: j?.promptInjection === 'none' ? 'none' : 'default',
     replyDeliveryDefault: j?.replyDeliveryDefault === 'transcript' ? 'transcript' : 'send',
     replyDeliverySupported: j?.replyDeliverySupported === true,
     codexAuthSync: j?.codexAuthSync === 'isolated' ? 'isolated' : 'shared',
@@ -197,6 +216,7 @@ export function botDefaultsPayload(bot: DashboardBotDescriptor, j?: any, error?:
     skillInjectionDefault: (j?.skillInjectionDefault === 'global' || j?.skillInjectionDefault === 'off') ? j.skillInjectionDefault : 'prompt',
     skillInjectionSupport: (j?.skillInjectionSupport === 'dynamic' || j?.skillInjectionSupport === 'global') ? j.skillInjectionSupport : 'none',
     maxLiveWorkers: typeof j?.maxLiveWorkers === 'number' ? j.maxLiveWorkers : null,
+    idleSuspendMinutes: typeof j?.idleSuspendMinutes === 'number' ? j.idleSuspendMinutes : null,
     logicalSessionCount: typeof j?.logicalSessionCount === 'number' ? j.logicalSessionCount : 0,
     residentSessionCount: typeof j?.residentSessionCount === 'number' ? j.residentSessionCount : 0,
     dormantSessionCount: typeof j?.dormantSessionCount === 'number' ? j.dormantSessionCount : 0,

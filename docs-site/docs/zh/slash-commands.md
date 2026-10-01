@@ -11,10 +11,13 @@
 | `/repo <路径\|项目名>` | 直接指定路径或 workingDir 下的一级项目名 |
 | `/cd <路径>` | 切换工作目录并重启 CLI 进程 |
 | `/status` | 查看会话信息（运行时间、终端地址等） |
+| `/lane status` | 查看本人的独立 principal lane，包括分支、worktree、脏状态和未推送提交数（复用现有 bot 级 XPI 开关启用 principal lane 时可用） |
+| `/lane close` | 安全关闭本人的独立 principal lane：有运行中/排队任务或未提交文件时拒绝，回收前先推送未发布提交，且不会自动合并或删除分支 |
 | `/retry` | 重试最近一个失败或被中断的 turn（10s 冷却） |
 | `/stop` | 中断当前 turn，保留会话；等价于流式卡片里的「停止」按钮 |
 | `/restart` | 重启 CLI 进程（保留 session 上下文） |
 | `/close` | 关闭会话并发送可恢复卡片（含 CLI 自身 resume 命令） |
+| `/dismiss` | 专属会话群顶层专用：二次确认后关闭会话并解散整个群（仅建群者本人且具备操作权限；代码与 worktree 保留；私聊、普通群、子话题、adopt 会话不支持）。只想关闭会话、保留群聊请用 `/close` |
 | `/cleanup-wt <ID>` | worktree 最终删除失败后重试已持久化的清理任务；删除前会重新校验权限、活动会话、worktree 身份和安全状态 |
 | `/fork <任务>` | 继承当前会话的完整上下文，在同一话题群新建并行子话题；源会话原样继续（Claude 系 / Codex 或 TraeX 终端模式） |
 | `/forklist` | 重发当前会话的分身任务面板，显示运行/结束状态和子话题链接 |
@@ -22,7 +25,7 @@
 | `/rename <标题>` | 重命名当前 Botmux 会话，并同步运行中的 Codex/Claude 原生会话名 |
 | `/fork --create <新群名>` | 把当前空闲会话分身到一个新建群，源会话原样保留继续（Claude 系 / Codex 或 TraeX 终端模式；Hybrid RPC / 外部 app-server 会话不支持；需在源会话内发起） |
 | `/card` | 手动召唤当前会话的流式卡片（关流式时也能召唤并恢复实时刷新；私密卡片模式下改发仅授权人可见的静态快照）。`/card off`、`/card on` 控制本群是否出流式卡；`/card pin off`、`/card pin on`、`/card pin status` 控制当前群的流式卡片置顶开关。仅 `allowedUsers` 可执行（开关影响全群，飞书没有按人视图） |
-| `/cot` | 思考过程消息开关：`/cot off` 关闭本群的思考气泡，`/cot on` 恢复，`/cot show` 在开关关闭时临时召唤一次当前回合的思考气泡，`/cot status` 查看状态（bot 级总开关 `thinkingCard` 默认 on；支持 claude-code / codex / traex）。仅 `allowedUsers` 可执行 |
+| `/cot` | CoT 开关：`/cot off` 关闭本群的思考与工具过程，`/cot on` 恢复，`/cot show` 在开关关闭时临时展示一次当前回合，`/cot status` 查看状态（bot 级总开关 `cotEnabled` 默认 on；支持 claude-code / codex / traex）。仅 `allowedUsers` 可执行 |
 | `/mention-mode [always\|topic\|never\|ambient\|status]` | 普通群的 @ 策略：什么时候可以不 @ 也回应。查询需对话权、修改需操作权；**仅普通群可设**（私聊/话题群/会话群会被拒绝）。四模式语义与 8 个免 @ 例外见 [@ 策略](/mention-mode) |
 | `/term` | 获取当前会话的「可操作终端」（带写权限）链接，私密发给 owner（群内仅你可见，话题/单聊回退私信，不在群里暴露） |
 | `/quote` | 弹出本群话题选择卡，选一个就把那个话题的聊天记录读进当前会话。补的是飞书本身的缺口——飞书的「引用」只能引单条消息，没有「引用整个话题」的入口。读完只回一句确认（多少条、时间跨度、主题），等你下一条指令 |
@@ -166,10 +169,13 @@ CLI 会从当前 `BOTMUX_SESSION_ID` 自动确定 bot 和群；脱离当前会�
 
 | 命令 | 说明 |
 |------|------|
-| `/login` | 飞书用户授权，授权后可下载第三方卡片图片、以你身份调云文档/日历等 API |
+| `/login` | 飞书基础用户授权：消息读取、资源访问和授权续期；不默认申请云文档、通讯录或日历权限 |
+| `/login --scope <权限名> [更多权限名]` | 在基础权限上按需追加指定权限，例如 `/login --scope docx:document:readonly` |
 | `/login status` | 查看授权状态 |
 | `/login tags` | 会话群标签专项授权（消息分组权限），授权后新建会话群自动进入侧边栏分组（p2pMode=group + feed-group 标签模式用，feed-group 为默认标签模式） |
 | `/pair <配对码>` | 把 Web/Dashboard 端的会话与你的飞书身份配对（在网页端拿配对码，话题里发 `/pair <码>` 认领） |
+
+基础授权需要应用开通 `im:message:readonly`、`im:resource`、`offline_access`。其它操作若返回 `missing_scope`，按错误中的权限名使用 `/login --scope ...` 补授权，并由应用管理员先在开发者后台开通相应的用户权限。资源不可见或无访问权需要处理该资源的授权，重复 `/login` 不能解决。
 
 ## 🎭 角色（人设）
 

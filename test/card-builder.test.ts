@@ -386,6 +386,25 @@ describe('buildSlashListCard', () => {
     expect(markdown).toContain('Forge \\*Codex\\* \\<at id=all\\>\\</at\\>');
     expect(markdown).not.toContain('<at id=all></at>');
   });
+
+  it('renders discovered commands in an auto-height table', () => {
+    const card = parse(buildSlashListCard({
+      cliName: 'codex',
+      builtin: [],
+      custom: [],
+      discovered: [{ name: 'review', description: 'review the current diff' }],
+      workingDir: '/workspace',
+      mcpServers: [],
+      discoverySupported: true,
+    }, 'en'));
+
+    const table = card.body.elements.find((element: any) => element.tag === 'table');
+    expect(table).toBeTruthy();
+    expect(table.row_height).toBe('auto');
+    expect(table.row_max_height).toBe('300px');
+    expect(table.header_style.lines).toBeGreaterThanOrEqual(2);
+    expect(table.rows).toEqual([{ cmd: '`review`', desc: 'review the current diff' }]);
+  });
 });
 
 describe('buildConfigCard', () => {
@@ -455,6 +474,24 @@ describe('buildConfigCard', () => {
       .find((e: any) => (e.actions ?? []).some((a: any) => a.value?.field === 'p2pOpen'));
     expect((securityRow.actions ?? []).map((a: any) => a.value?.field))
       .toEqual(['disableCliBypass', 'restrictGrantCommands', 'p2pOpen']);
+  });
+
+  it('renders the grantRequestToOwnerDm quick-toggle in the security section with a real label', () => {
+    const data = configData(null);
+    data.booleans = [...data.booleans, { key: 'grantRequestToOwnerDm', on: false }];
+    const en = parse(buildConfigCard(data, 'en'));
+    const toggle = allActions(en).find((a: any) => a.value?.field === 'grantRequestToOwnerDm');
+    expect(toggle.value.action).toBe('config_toggle');
+    expect(toggle.type).toBe('default');
+    expect(toggle.text.content).toBe('⚪ Forward requests to owner DM');
+    const zh = parse(buildConfigCard(data, 'zh'));
+    expect(allActions(zh).find((a: any) => a.value?.field === 'grantRequestToOwnerDm').text.content).toBe('⚪ 申请卡转投私聊');
+
+    const securityRow = en.elements
+      .filter((e: any) => e.tag === 'action')
+      .find((e: any) => (e.actions ?? []).some((a: any) => a.value?.field === 'grantRequestToOwnerDm'));
+    expect((securityRow.actions ?? []).map((a: any) => a.value?.field))
+      .toEqual(['disableCliBypass', 'restrictGrantCommands', 'p2pOpen', 'grantRequestToOwnerDm']);
   });
 
   it('shows the p2pOpen toggle as off when the bot has not opted in', () => {
@@ -533,6 +570,8 @@ describe('buildForkPanelCard', () => {
     ], 'en'));
     const table = card.body.elements.find((element: any) => element.tag === 'table');
 
+    expect(table.row_height).toBe('auto');
+    expect(table.row_max_height).toBe('300px');
     expect(table.rows).toEqual([
       {
         instruction: 'investigate cleanup',
@@ -896,6 +935,18 @@ describe('buildStreamingCard', () => {
   it('should have wide_screen_mode config', () => {
     const card = parse(buildStreamingCard(SID, ROOT, URL, TITLE, CONTENT, 'working'));
     expect(card.config.wide_screen_mode).toBe(true);
+    expect(card.config.update_multi).toBe(true);
+  });
+
+  it('marks every callback action with the patchable streaming-card version', () => {
+    const card = parse(buildStreamingCard(
+      SID, ROOT, URL, TITLE, CONTENT, 'working', 'claude-code', 'screenshot',
+    ));
+    const callbackActions = allActions(card).filter((action: any) => action.value?.action);
+    expect(callbackActions.length).toBeGreaterThan(0);
+    for (const action of callbackActions) {
+      expect(action.value.stream_card_version).toBe('1');
+    }
   });
 
   // ── Header / status / template color ───────────────────────────────────
@@ -2318,6 +2369,10 @@ describe('buildPrivateSnapshotCard', () => {
       .filter((e: any) => e.tag === 'action')
       .flatMap((e: any) => e.actions ?? []);
   }
+
+  it('does not opt private one-shot snapshots into shared PATCH updates', () => {
+    expect(build().config.update_multi).toBeUndefined();
+  });
 
   it('exposes open-terminal link, get_write_link, close for non-Codex/TRAE sessions, with no patch-driven controls', () => {
     const card = build({ screen: 'hello' });
