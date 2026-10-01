@@ -1,5 +1,4 @@
 import { formatSlashGroupName, parseGroupCreationArgs, resolveGroupCreationAgents, resolveGroupDecorations, type GroupCreationArgs } from '../services/group-creation-options.js';
-import { isSharedOnlyBot } from './shared-only.js';
 /**
  * Command handler — processes /slash commands from users.
  * Extracted from daemon.ts for modularity.
@@ -4649,11 +4648,6 @@ export async function handleCommand(
           ADOPT_RESUME_LIMIT,
           botCfgForAdopt?.cliRuntime?.executable,
         );
-        if (isSharedOnlyBot(larkAppId ?? ds?.larkAppId)) {
-          // Only attach live HERDR panes; disk resume would create a new process.
-          candidates.sessions = candidates.sessions.filter(s => 'herdrPaneId' in s && !!s.herdrPaneId);
-          candidates.resumable = [];
-        }
         const sessions = candidates.sessions;
         const resumable = candidates.resumable;
         if (
