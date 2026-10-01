@@ -43,11 +43,6 @@ export function validateKllLaunch(input: LaunchInput): void {
   if (!['claude-code', 'codebuddy', 'kimi', 'codex', 'dsh'].includes(input.cliId)) throw new Error('KLL requires a supported native CLI adapter');
   if (input.cliId === 'codebuddy' && /WorkBuddy[^/]*\.app\//i.test(input.cliPathOverride ?? '')) throw new Error('KLL cb requires standalone CodeBuddy');
   if (input.cliId === 'dsh') {
-    // Live mode binds an already-running official Web owner whose model and
-    // permissions are authoritative; KLL launch-time selection cannot apply.
-    if (typeof input.env?.DSH_LIVE_CONNECTION_FILE === 'string' && input.env.DSH_LIVE_CONNECTION_FILE.trim()) {
-      throw new Error('KLL dsh cannot combine with the live Web owner binding (DSH_LIVE_CONNECTION_FILE)');
-    }
     if (input.dshRuntime === 'tui') throw new Error('KLL dsh requires the SDK runner; the dsh-tui runtime is not supported');
   }
   if (input.wrapperCli || input.cliLaunchMode || input.codexRpcInput || input.existingAppServerEndpoint
