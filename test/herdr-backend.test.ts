@@ -139,14 +139,16 @@ const WORKSPACE_CREATED_REPLY = (workspaceId: string, paneId: string) => JSON.st
 const MANAGED_WORKSPACE = 'w_launch';
 const MANAGED_PANE = 'w_launch-1';
 
-/** Decode the one shell-quoted COMMAND argument so tests can inspect the file. */
+/** Decode the one COMMAND argument so tests can inspect the file. The launcher
+ *  is /bin/sh's script operand, never exec'd directly: macOS Gatekeeper holds
+ *  and may SIGKILL a directly exec'd temp script (AIO-176). */
 function paneLauncherPath(): string {
   const call = herdrCall('pane', 'run');
   expect(call).toHaveLength(6);
   expect(call!.slice(0, 5)).toEqual(['--session', SESSION, 'pane', 'run', MANAGED_PANE]);
   const command = call![5]!;
-  expect(command).toMatch(/^'\/.*'$/);
-  return command.slice(1, -1).replaceAll("'\"'\"'", "'");
+  expect(command).toMatch(/^\/bin\/sh '\/.*'$/);
+  return command.slice('/bin/sh '.length + 1, -1).replaceAll("'\"'\"'", "'");
 }
 
 function setManagedLaunchResponses(kind: string, overrides: HerdrResponseHandler[] = []) {
