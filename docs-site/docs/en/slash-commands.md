@@ -11,10 +11,13 @@ Just send these commands directly in a topic, and the daemon intercepts and hand
 | `/repo <path\|project name>` | Directly specify a path or a top-level project name under workingDir |
 | `/cd <path>` | Switch the working directory and restart the CLI process |
 | `/status` | View session info (uptime, terminal address, etc.) |
+| `/lane status` | Inspect your isolated principal lane, including its branch, worktree, dirty state, and unpushed commit count (available when the existing bot-level XPI switch enables principal lanes) |
+| `/lane close` | Safely close your isolated principal lane: refuses while work is running/queued or files are uncommitted, pushes unpublished commits before cleanup, and never auto-merges or deletes the branch |
 | `/retry` | Retry the most recent failed or interrupted turn (10s cooldown) |
 | `/stop` | Interrupt the current turn while keeping the session; same as the streaming card's Stop button |
 | `/restart` | Restart the CLI process (preserving the session context) |
 | `/close` | Close the session and send a recoverable card (including the CLI's own resume command) |
+| `/dismiss` | Top level of a dedicated session group only: after confirmation, closes the session and disbands the whole group (the creator with operator permission only; code and worktrees are kept; not supported in DMs, ordinary groups, subtopics, or adopted sessions). To keep the chat, use `/close` |
 | `/cleanup-wt <ID>` | Retry a persisted worktree cleanup after a final removal failure; revalidates authorization, active sessions, worktree identity, and safety state before deleting |
 | `/fork <task>` | Fork the current session with full context into a new sub-topic of the same topic group; the source session keeps running untouched (Claude family, Codex terminal, or TraeX terminal mode) |
 | `/forklist` | Re-post the current session's forked-task panel with live/closed status and links to the child topics |
@@ -22,7 +25,7 @@ Just send these commands directly in a topic, and the daemon intercepts and hand
 | `/rename <title>` | Rename this Botmux session and sync the running Codex/Claude native session name |
 | `/fork --create <new group name>` | Clone the current idle session into a newly-created group while leaving the source session untouched (Claude family, Codex terminal, or TraeX terminal mode; Hybrid RPC / external app-server sessions are unsupported; invoke inside the source session) |
 | `/card` | Manually summon the current session's streaming card (can summon and restore live refresh even when streaming is off; in private-card mode, sends a static snapshot visible only to authorized users instead). `/card off` and `/card on` toggle streaming cards for this chat; `/card pin off`, `/card pin on`, and `/card pin status` control the per-chat streaming-card Pin override. `allowedUsers` only (the switch affects the whole chat — Lark has no per-person card view) |
-| `/cot` | Thinking-process message switch: `/cot off` mutes this chat's thinking bubble, `/cot on` restores it, `/cot show` summons a one-off peek at the current turn's bubble while the switches are off, `/cot status` reports the state (bot-level master switch `thinkingCard`, on by default; supports claude-code / codex / traex). `allowedUsers` only |
+| `/cot` | CoT switch: `/cot off` mutes this chat's thinking and tool activity, `/cot on` restores it, `/cot show` reveals the current turn once while the switch is off, `/cot status` reports the state (bot-level master switch `cotEnabled`, on by default; supports claude-code / codex / traex). `allowedUsers` only |
 | `/mention-mode [always\|topic\|never\|ambient\|status]` | The regular-group mention policy: when the bot answers without an @. Querying needs talk access, changing needs operate rights; **regular groups only** (rejected in DMs, topic groups, and session groups). The four modes and the 8 no-@ exceptions are explained in [Mention Policy](/en/mention-mode) |
 | `/term` | Get the operable (write-enabled) terminal link for this session, delivered privately to the owner (visible-to-you in-chat, falling back to DM in topic/p2p — never exposed in the group) |
 | `/quote` | Pop a picker of this chat's topics; choosing one reads that topic's transcript into the current session. This fills a gap in Feishu itself — its quote-reply UI can only reference a single message, never a whole topic. The bot replies with a short acknowledgement (how many messages, time span, subject) and waits for your next instruction |
@@ -166,10 +169,13 @@ Permissions are the same as `/help`, and it doesn't occupy a session slot.
 
 | Command | Description |
 |------|------|
-| `/login` | Lark user authorization; once authorized, you can download third-party card images and call cloud docs/calendar and other APIs as yourself |
+| `/login` | Basic Lark user authorization: read messages, access resources, and renew authorization; does not request docs, contacts, or calendar permissions by default |
+| `/login --scope <scope> [more scopes]` | Add only the requested permissions to the basic scopes, e.g. `/login --scope docx:document:readonly` |
 | `/login status` | View authorization status |
 | `/login tags` | Session-group tag authorization (feed-group scopes); once granted, new session groups auto-join your sidebar feed group (for p2pMode=group with the feed-group tag mode — the default) |
 | `/pair <pairing code>` | Pair a Web/Dashboard-side session with your Lark identity (get the pairing code on the web side, then send `/pair <code>` in the topic to claim it) |
+
+Basic authorization requires the app to enable `im:message:readonly`, `im:resource`, and `offline_access`. If another operation returns `missing_scope`, request the names reported by the error with `/login --scope ...`; the app administrator must first enable those user permissions in the developer console. Resource visibility/access errors require access to that resource, not another `/login`.
 
 ## 🎭 Roles (Personas)
 

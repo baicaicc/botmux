@@ -40,6 +40,7 @@ import {
   type DynamicToolCallParams,
 } from './services/codex-browser-broker.js';
 import type { CodexBrowserFamily } from './core/codex-browser-config.js';
+import { CodexAppCotCollector, prepareCodexAppCotMarker } from './services/codex-app-cot.js';
 
 type JsonObject = Record<string, any>;
 
@@ -169,6 +170,7 @@ interface QueuedInput {
 }
 
 const output = new RunnerControlWriter();
+const cotCollector = new CodexAppCotCollector();
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 const RECONCILIATION_TIMEOUT_MS = 5_000;
 const RECONCILIATION_PAGE_LIMIT = 3;
@@ -330,6 +332,11 @@ class AppServerClient {
   private lastStderr = '';
   private fatalError?: Error;
 
+  get hasExited(): boolean {
+    // 后代可能继续持有 stdio，进程退出不能等到 close 才识别。
+    return this.child.exitCode !== null || this.child.signalCode !== null;
+  }
+
   constructor(private readonly codexBin: string, private readonly cwd: string) {
     this.child = spawn(codexBin, ['app-server', '--listen', 'stdio://'], {
       cwd,
@@ -351,6 +358,7 @@ class AppServerClient {
       this.failAll(new Error(`Failed to start Codex app-server with "${codexBin}": ${err.message}${hint}`));
     });
     this.child.on('exit', (code, signal) => {
+      writeLine(`[codex-app] app-server exited (code=${code}, signal=${signal})`);
       const err = this.fatalError ?? new Error(`Codex app-server exited (code=${code}, signal=${signal})${this.lastStderr ? `\n${this.lastStderr}` : ''}`);
       this.failAll(err);
     });
@@ -756,6 +764,7 @@ const browserBroker = args.browserFamily
     })
   : undefined;
 let threadReady = false;
+let strictThreadResume = args.strictResume === true;
 let activeTurn: ActiveTurn | null = null;
 let activeTurnEpoch = 0;
 /** App-server may start a Goal continuation without a Botmux input. Keep that
@@ -869,6 +878,7 @@ function detectedCodexVersion(): CodexVersion | undefined {
 }
 
 function makeTurn(clientUserMessageId: string | undefined, requestKind: 'start' | 'steer'): ActiveTurn {
+  cotCollector.reset();
   let resolveDone!: () => void;
   const done = new Promise<void>(resolve => { resolveDone = resolve; });
   return {
@@ -1238,6 +1248,11 @@ function handleNotification(msg: JsonObject, replayedAfterResponse = false): voi
   if (msg.method === 'turn/completed') {
     const nativeTurn = params.turn ?? {};
     const completedId = typeof notificationTurnId === 'string' ? notificationTurnId : undefined;
+    if (completedId && browserBroker) {
+      void browserBroker.handleTurnEnded(completedId).catch(error => {
+        writeLine(`[codex-app] browser turn-ended hook failed: ${asError(error).message}`);
+      });
+    }
     if (completedId && nativeActiveTurnId === completedId) nativeActiveTurnId = undefined;
     const turn = activeTurn;
     if (!turn) {
@@ -1393,6 +1408,13 @@ function handleNotification(msg: JsonObject, replayedAfterResponse = false): voi
     turn.keepPendingDeadlineAtMs = Date.now() + keepPendingTimeoutMs();
   }
 
+  const cotEntries = cotCollector.observe(msg.method, params);
+  const cotTurnId = turn.accepted?.at(-1)?.replyTurnId;
+  if (cotTurnId && cotEntries.length > 0) {
+    const marker = prepareCodexAppCotMarker(cotTurnId, cotEntries);
+    if (marker) emitMarker('thinking', marker);
+  }
+
   if (msg.method === 'item/started') {
     const item = params.item;
     if (item?.type === 'commandExecution') {
@@ -1483,6 +1505,14 @@ function isDefiniteRpcRejection(error: unknown): boolean {
 }
 
 async function ensureThread(startupDeadlineAtMs?: number): Promise<string> {
+  if (client.hasExited && !activeTurn && nativeActiveTurnId === undefined && !generationFenced) {
+    // 只恢复尚未投递的新输入；已发送轮次的未知结果仍由 fenceUnknown 保护。
+    writeLine('[codex-app] app-server exited while idle; reconnecting the existing thread');
+    threadReady = false;
+    strictThreadResume = true;
+    startupDeadlineAtMs ??= Date.now() + DEFAULT_REQUEST_TIMEOUT_MS;
+    await initializeAppServer(startupDeadlineAtMs);
+  }
   if (threadReady && threadId) return threadId;
 
   if (threadId) {
@@ -1507,7 +1537,7 @@ async function ensureThread(startupDeadlineAtMs?: number): Promise<string> {
         ...(browserBroker ? { dynamicTools: [CODEX_BROWSER_DYNAMIC_TOOL] } : {}),
       }, { timeoutMs: startupRequestTimeout(startupDeadlineAtMs, 'thread/resume') });
       const resumedThreadId = String(resumed.thread.id);
-      if (args.strictResume && resumedThreadId !== threadId) {
+      if (strictThreadResume && resumedThreadId !== threadId) {
         throw new Error(`Strict resume expected thread ${threadId}, received ${resumedThreadId}`);
       }
       threadId = resumedThreadId;
@@ -1520,7 +1550,7 @@ async function ensureThread(startupDeadlineAtMs?: number): Promise<string> {
       // explicit app-server "missing thread" rejection permits normal fallback;
       // maintenance resumes must preserve the original thread in every case.
       if (isActiveWriterConflict(err)) throw new CodexAppActiveWriterError(threadId, err);
-      if (args.strictResume || !isExplicitMissingThread(err)) throw err;
+      if (strictThreadResume || !isExplicitMissingThread(err)) throw err;
       writeLine(`[codex-app] resume failed, starting a fresh thread: ${err?.message ?? err}`);
       threadId = undefined;
       threadReady = false;
@@ -2437,6 +2467,22 @@ function handleInput(data: Buffer): void {
   }
 }
 
+async function initializeAppServer(deadlineAtMs: number): Promise<void> {
+  const current = new AppServerClient(args.codexBin, args.cwd);
+  client = current;
+  // 旧代请求直接消费，不能落入默认回复并再次写入已退出的进程。
+  current.onRequest(message => client !== current || handleServerRequest(message));
+  current.onNotification(message => {
+    if (client === current) handleNotification(message);
+  });
+  try {
+    await current.initialize(startupRequestTimeout(deadlineAtMs, 'initialize'));
+  } catch (err) {
+    current.close();
+    throw err;
+  }
+}
+
 async function main(): Promise<void> {
   const testTimeout = process.env.NODE_ENV === 'test'
     ? Number(process.env.BOTMUX_TEST_CODEX_APP_STARTUP_TIMEOUT_MS)
@@ -2450,10 +2496,7 @@ async function main(): Promise<void> {
     process.exit(2);
   }, startupTimeoutMs);
   await controlReady;
-  client = new AppServerClient(args.codexBin, args.cwd);
-  client.onRequest(handleServerRequest);
-  client.onNotification(handleNotification);
-  await client.initialize(startupRequestTimeout(startupDeadlineAtMs, 'initialize'));
+  await initializeAppServer(startupDeadlineAtMs);
   await ensureThread(startupDeadlineAtMs);
   writeLine('Codex App connected.');
   runnerReady = true;

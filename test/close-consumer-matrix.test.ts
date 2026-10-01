@@ -74,12 +74,17 @@ const CONSUMERS: Record<string, Rule> = {
     count: 3,
   },
   // ── user surfaces: must render refusal AND residual ──────────────────────
+  'core/dismiss-command.ts::dismissSessionGroup::closeSession': {
+    category: 'user_surface',
+    why: '/dismiss returns refusal/residual details to the command handler and '
+      + 'preserves the group unless closure is known and clean; test/dismiss-command.test.ts covers both.',
+  },
   'core/command-handler.ts::handleCommand::closeSession': {
     category: 'user_surface',
-    why: '/close, shared-adopt /detach and /disconnect, and same-daemon /close wt '
-      + 'siblings all branch on refused/residual results; none report ordinary '
-      + 'success or remove a worktree while cleanup is unproven.',
-    count: 5,
+    why: '/close, /lane close, shared-adopt /detach and /disconnect, and same-daemon '
+      + '/close wt siblings all branch on refused/residual results; none report '
+      + 'ordinary success or remove a worktree while cleanup is unproven.',
+    count: 6,
   },
   'core/command-handler.ts::commitRepoSelection::closeSession': {
     category: 'user_surface',
@@ -334,6 +339,10 @@ const RESPONSE_CONSUMERS: Record<string, ResponseRule> = {
   },
   'dashboard.ts::<module>::close-route': {
     why: 'Idle cleanup close callback forwards residual separately from failures.',
+    mustParse: true,
+  },
+  'dashboard.ts::closeCandidate::close-route': {
+    why: 'Scheduled auto-cleanup forwards residual, counted apart from failures.',
     mustParse: true,
   },
   'dashboard/web/sessions-page.tsx::SessionsPage::close-route': {

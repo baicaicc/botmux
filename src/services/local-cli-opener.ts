@@ -22,6 +22,7 @@ export const LOCAL_CLI_IDS = [
   'genius',
   'opencode',
   'opencode2',
+  'mimocode',
   'antigravity',
   'mtr',
   'hermes',
@@ -48,6 +49,7 @@ const RESUME_COMMAND_PREFIXES: Record<Exclude<LocalCliId, 'oh-my-pi'>, string> =
   'genius': 'genius --resume',
   'opencode': 'opencode -s',
   'opencode2': 'opencode2 -s',
+  'mimocode': 'mimo -s',
   'antigravity': 'agy --conversation',
   'mtr': 'mtr --session',
   'hermes': 'hermes --resume',
@@ -276,8 +278,8 @@ function buildManagedAttachCommand(ds: DaemonSession): LocalCliOpenResult {
     }
     return { ok: true, command: `herdr session attach ${shellQuote(target.sessionName)}` };
   }
-  if (backendType === 'zmx') {
-    const socketEnv = ['ZMX_DIR', 'XDG_RUNTIME_DIR', 'TMPDIR']
+  if (target.backendType === 'zmx') {
+    const socketEnv = (target.socketDir === undefined ? ['ZMX_DIR', 'XDG_RUNTIME_DIR', 'TMPDIR'] : [])
       .flatMap((key) => process.env[key] ? [`export ${key}=${shellQuote(process.env[key]!)}`] : []);
     const prelude = [
       'unset ZMX_SESSION ZMX_SESSION_PREFIX',
@@ -289,6 +291,7 @@ function buildManagedAttachCommand(ds: DaemonSession): LocalCliOpenResult {
       '__zmx-attach-managed',
       shellQuote(target.sessionName),
       shellQuote(ds.session.sessionId),
+      ...(target.socketDir !== undefined ? [shellQuote(target.socketDir)] : []),
     ].join(' ');
     return {
       ok: true,

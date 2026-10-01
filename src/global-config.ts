@@ -131,6 +131,13 @@ export interface WorkflowFeatureGlobalConfig {
   enabled?: boolean;
 }
 
+export interface MultiTopicGlobalConfig {
+  /** Machine-wide multi-topic orchestration switch. Missing means enabled for
+   *  backwards compatibility. When disabled, botmux-orchestrate is hidden and
+   *  `botmux dispatch` may only append to an existing topic via `--into`. */
+  enabled?: boolean;
+}
+
 export interface WorkerConfig {
   /** Default-on switch for fresh/resumed worker memory admission. */
   memoryAdmissionEnabled?: boolean;
@@ -140,6 +147,26 @@ export interface WorkerConfig {
   maxMemoryFullAvg10?: number;
   /** Optional per-session hard limit. Applied only after cgroup-v2 placement is verified. */
   sessionMemoryMaxBytes?: number;
+}
+
+/** Supported idle thresholds (hours) for both the manual「清理空闲」button and
+ *  scheduled auto-cleanup. Kept in lockstep with session-cleanup's
+ *  IDLE_CLEANUP_HOUR_OPTIONS so the two paths never diverge. */
+export const SESSION_CLEANUP_HOUR_OPTIONS = [24, 72, 168] as const;
+export type SessionCleanupHours = typeof SESSION_CLEANUP_HOUR_OPTIONS[number];
+/** Bounds for the check cadence. A 5-minute floor keeps a hand-edited config
+ *  from turning the sweep into a hot loop; the default matches "once an hour". */
+export const SESSION_CLEANUP_MIN_INTERVAL_MINUTES = 5;
+export const SESSION_CLEANUP_DEFAULT_INTERVAL_MINUTES = 60;
+export const SESSION_CLEANUP_DEFAULT_HOURS: SessionCleanupHours = 168;
+
+export interface SessionCleanupGlobalConfig {
+  /** 定时自动清理空闲会话开关。缺省关闭 —— 不开启则完全保持既有（纯手动）行为。 */
+  enabled?: boolean;
+  /** 空闲阈值（小时）。仅接受 24 / 72 / 168，与手动清理按钮完全一致。缺省 168（7 天）。 */
+  olderThanHours?: SessionCleanupHours;
+  /** 检查频率（分钟）。缺省 60，最小 5（低于则回退到最小值）。 */
+  intervalMinutes?: number;
 }
 
 export interface GlobalConfig {
@@ -170,6 +197,10 @@ export interface GlobalConfig {
   codexNotifier?: CodexNotifierGlobalConfig;
   /** 机器过载告警。机器级、默认关闭，由 Dashboard 管理;走所选「通知 Bot」发送。 */
   hostOverloadAlert?: HostOverloadAlertGlobalConfig;
+  /** 定时自动清理空闲会话。机器级、默认关闭，由 Dashboard 管理。开启后由 dashboard
+   *  聚合进程周期性调用与手动「清理空闲」按钮完全相同的判定/关闭逻辑
+   *  （dashboard/session-cleanup.ts），无人值守地关掉空闲超过阈值的会话。 */
+  sessionCleanup?: SessionCleanupGlobalConfig;
   /** Machine-wide meeting listener kill-switch. Missing / enabled !== false
    *  preserves legacy behavior; set false to stop accepting new VC meetings
    *  and skip restore/readiness for this host. */
@@ -178,6 +209,9 @@ export interface GlobalConfig {
    *  feature OFF; set true to enable it host-wide. The
    *  `BOTMUX_WORKFLOW_ENABLED` env var overrides this when set. */
   workflow?: WorkflowFeatureGlobalConfig;
+  /** Machine-wide multi-topic orchestration switch. Missing / enabled !== false
+   *  preserves legacy behavior. `BOTMUX_MULTI_TOPIC_ENABLED` overrides it. */
+  multiTopic?: MultiTopicGlobalConfig;
   /** Optional HTTP(S) proxy for the daemon's own outbound downloads (e.g. the
    *  HD2D office assets). Node's global fetch ignores HTTP_PROXY/HTTPS_PROXY,
    *  so hosts behind a proxy must set this (or the env vars, which we read as a
@@ -240,6 +274,9 @@ export interface MaintenanceConfig {
    *  its own — reuses autoUpdate's time, fires only when there's a pending
    *  update. */
   autoRestart?: MaintenanceToggle;
+  /** Whether an intentional restart sends the owner a restart report DM.
+   *  Missing preserves the legacy behavior (enabled). */
+  notifyOnRestart?: boolean;
 }
 
 export interface MaintenanceTask {
@@ -349,9 +386,17 @@ export interface DashboardGlobalConfig {
 function readVoice(raw: unknown): VoiceConfig | undefined {
   if (!raw || typeof raw !== 'object') return undefined;
   const v = raw as Record<string, unknown>;
-  const engineOk = v.engine === 'sami' || v.engine === 'openai' || v.engine === undefined;
+  const engineOk = v.engine === 'sami' || v.engine === 'openai' || v.engine === 'minimax' || v.engine === undefined;
   if (!engineOk) return undefined;
-  if (!v.sami && !v.openai && !v.engine && !v.asr) return undefined;
+  if (!v.sami && !v.openai && !v.minimax && !v.engine && !v.asr) return undefined;
+  // 与 bot-registry 的 per-bot 解析对齐：minimax.region 只接受 'cn'/'global'，
+  // 拼错/其它值一律删掉（适配器再兜底 global），避免脏值静默落到海外端点、还被
+  // `voice status` 原样显示。
+  const mm = v.minimax;
+  if (mm && typeof mm === 'object' && !Array.isArray(mm)) {
+    const r = (mm as Record<string, unknown>).region;
+    if (r !== 'cn' && r !== 'global') delete (mm as Record<string, unknown>).region;
+  }
   return v as VoiceConfig;
 }
 
@@ -378,8 +423,8 @@ function readMaintenanceToggle(raw: unknown): MaintenanceToggle | undefined {
 }
 
 /** Validate a maintenance patch from the dashboard PUT. Type-strict on enabled
- *  (both keys) and on autoUpdate's time. autoRestart is a toggle — any `time`
- *  on it is ignored (it reuses autoUpdate's schedule). */
+ *  (both task keys), autoUpdate's time, and notifyOnRestart. autoRestart is a
+ *  toggle — any `time` on it is ignored (it reuses autoUpdate's schedule). */
 export function parseMaintenancePatch(
   body: unknown,
 ): { ok: true; patch: MaintenanceConfig } | { ok: false; error: string } {
@@ -412,6 +457,10 @@ export function parseMaintenancePatch(
     }
     patch.autoRestart = toggle;
   }
+  if ('notifyOnRestart' in b) {
+    if (typeof b.notifyOnRestart !== 'boolean') return { ok: false, error: 'invalid_notify_on_restart' };
+    patch.notifyOnRestart = b.notifyOnRestart;
+  }
   if (Object.keys(patch).length === 0) return { ok: false, error: 'empty' };
   return { ok: true, patch };
 }
@@ -424,6 +473,7 @@ function readMaintenance(raw: unknown): MaintenanceConfig | undefined {
   if (au) out.autoUpdate = au;
   const ar = readMaintenanceToggle(m.autoRestart);
   if (ar) out.autoRestart = ar;
+  if (typeof m.notifyOnRestart === 'boolean') out.notifyOnRestart = m.notifyOnRestart;
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
@@ -571,6 +621,32 @@ function readHostOverloadAlert(raw: unknown): HostOverloadAlertGlobalConfig | un
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
+/** Parse `sessionCleanup` from config. Whitelist known keys; drop invalid
+ *  values so a hand-edited config degrades to defaults rather than crashing.
+ *  `olderThanHours` accepts only the three supported thresholds (same set as the
+ *  manual button); `intervalMinutes` is clamped to a 5-minute floor. The tick
+ *  (dashboard/auto-cleanup.ts) layers defaults over whatever survives here. */
+function readSessionCleanup(raw: unknown): SessionCleanupGlobalConfig | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const value = raw as Record<string, unknown>;
+  const out: SessionCleanupGlobalConfig = {};
+  if (typeof value.enabled === 'boolean') out.enabled = value.enabled;
+  if (
+    typeof value.olderThanHours === 'number'
+    && (SESSION_CLEANUP_HOUR_OPTIONS as readonly number[]).includes(value.olderThanHours)
+  ) {
+    out.olderThanHours = value.olderThanHours as SessionCleanupHours;
+  }
+  if (
+    typeof value.intervalMinutes === 'number'
+    && Number.isFinite(value.intervalMinutes)
+    && value.intervalMinutes >= SESSION_CLEANUP_MIN_INTERVAL_MINUTES
+  ) {
+    out.intervalMinutes = Math.floor(value.intervalMinutes);
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
 /**
  * 只做结构层解析（是不是数组 / defaultMode 枚举 / id 是不是非空串），字段级
  * 权威校验留给 bot-registry 的严格 normalizer——它在目录被合进某个 bot 时运行，
@@ -641,6 +717,14 @@ function readWorkflowFeature(raw: unknown): WorkflowFeatureGlobalConfig | undefi
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
+function readMultiTopic(raw: unknown): MultiTopicGlobalConfig | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const v = raw as Record<string, unknown>;
+  const out: MultiTopicGlobalConfig = {};
+  if (typeof v.enabled === 'boolean') out.enabled = v.enabled;
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
 export function globalConfigPath(): string {
   return join(homedir(), '.botmux', 'config.json');
 }
@@ -707,10 +791,14 @@ export function readGlobalConfig(): GlobalConfig {
   if (codexNotifier) out.codexNotifier = codexNotifier;
   const hostOverloadAlert = readHostOverloadAlert(raw.hostOverloadAlert);
   if (hostOverloadAlert) out.hostOverloadAlert = hostOverloadAlert;
+  const sessionCleanup = readSessionCleanup(raw.sessionCleanup);
+  if (sessionCleanup) out.sessionCleanup = sessionCleanup;
   const vcMeetingAgent = readVcMeetingAgent(raw.vcMeetingAgent);
   if (vcMeetingAgent) out.vcMeetingAgent = vcMeetingAgent;
   const workflow = readWorkflowFeature(raw.workflow);
   if (workflow) out.workflow = workflow;
+  const multiTopic = readMultiTopic(raw.multiTopic);
+  if (multiTopic) out.multiTopic = multiTopic;
   if (typeof raw.httpProxy === 'string' && raw.httpProxy.trim()) out.httpProxy = raw.httpProxy.trim();
   // Lenient http(s) origin check; resolveOAuthRedirectUri re-validates shape.
   if (typeof raw.oauthRedirectBase === 'string' && /^https?:\/\//.test(raw.oauthRedirectBase.trim())) {
@@ -876,6 +964,18 @@ export function isCrossPrincipalInterruptionEnabled(
     return v === 'true' || v === '1' || v === 'yes' || v === 'on';
   }
   return readGlobalConfig().dashboard?.crossPrincipalInterruption === true;
+}
+
+/** Machine-wide multi-topic orchestration switch. Defaults ON for backwards
+ * compatibility. The env override is also injected into managed CLI sessions
+ * so sandboxed commands agree with the host daemon. */
+export function isMultiTopicOrchestrationEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  const flag = env.BOTMUX_MULTI_TOPIC_ENABLED;
+  if (flag != null && flag !== '') {
+    const v = flag.trim().toLowerCase();
+    return v === 'true' || v === '1' || v === 'yes' || v === 'on';
+  }
+  return readGlobalConfig().multiTopic?.enabled !== false;
 }
 
 /** Derive repo-picker scan options from the machine-wide `repoPickerMode`.
