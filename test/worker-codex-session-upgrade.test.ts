@@ -84,7 +84,7 @@ function harness() {
     codexAppTurnDispatchQueue: { size: () => 0 },
     codexAppRecoveredDispatches: [],
     hasStructuredLifecycleBlock: () => false,
-    wsClients: new Set(), clientPtys: new Map(),
+    wsClients: new Set(), sharedHerdrWsClients: new Set(), clientPtys: new Map(),
     codexUpgradeInspectionBlock: undefined,
     codexRunnerFreshness: 'current',
     shouldHoldCodexRunnerInput: () => false,
