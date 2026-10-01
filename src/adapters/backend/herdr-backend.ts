@@ -211,11 +211,18 @@ function shellSingleQuote(value: string): string {
 
 /** Build a short-lived canonical launcher for Herdr's managed-agent facade.
  *
- * Run this script by absolute path so interactive shell rc files cannot
- * shadow it by prepending real CLI directories to PATH. The mode-0700 script
+ * Run this script as `/bin/sh <absolute path>` so interactive shell rc files
+ * cannot shadow it by prepending real CLI directories to PATH. The mode-0700 script
  * restores the launch environment and execs the full command, including wrappers and
  * multiline prompts. It removes itself before exec; the backend also cleans
  * up when automatic agent detection succeeds or any launch step fails.
+ *
+ * Never execute the file directly. On macOS the shebang exec of a temp script
+ * carrying com.apple.provenance is held by Gatekeeper (syspolicyd notarization
+ * lookup + XProtect scan, ~0.5–1 s). Herdr already reports the agent by this
+ * file's name during that hold, so the cleanup above can delete the file first
+ * and syspolicyd then SIGKILLs the shell ("Terminating process due to
+ * Gatekeeper rejection"). Read as /bin/sh's script operand it is not assessed.
  */
 function createPaneAgentLauncher(
   canonicalExecutable: string,
@@ -896,9 +903,10 @@ export class HerdrBackend implements SessionBackend {
       launcher = createPaneAgentLauncher(basename(cliBin), bin, args, workspaceEnv);
       requiredJsonCommand(
         `herdr pane run ${paneId} in ${this.sessionName}`,
-        // One quoted COMMAND argument reaches the shell verbatim, even while
-        // it is loading rc files. Never pass the CLI's argv through Herdr.
-        herdrSessionArgs(this.sessionName, ['pane', 'run', paneId, shellSingleQuote(launcher.path)]),
+        // One COMMAND argument reaches the shell verbatim, even while it is
+        // loading rc files. Never pass the CLI's argv through Herdr, and never
+        // exec the launcher directly (see createPaneAgentLauncher).
+        herdrSessionArgs(this.sessionName, ['pane', 'run', paneId, `/bin/sh ${shellSingleQuote(launcher.path)}`]),
         { timeout: 5000, env: this.childEnv, allowEmpty: true },
       );
 
