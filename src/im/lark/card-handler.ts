@@ -8,6 +8,7 @@ import { existsSync } from 'node:fs';
 import { basename as pathBasename, dirname, join } from 'node:path';
 import { closeResidualIsLocal, describeCloseResidual } from '../../core/close-residual.js';
 import { config } from '../../config.js';
+import { approveTerminalDevice } from '../../core/terminal-device-pairing.js';
 import { replyCardKey, updateTurnReplyCard } from '../../core/turn-reply-card.js';
 import { TurnReplyCardStore, replyCardIsTerminal } from '../../services/turn-reply-card.js';
 import { getBot, getAllBots, getOwnerOpenId } from '../../bot-registry.js';
@@ -1110,6 +1111,16 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
   // Use the receiving bot's allowedUsers — the operator open_id in card actions
   // is scoped to the app that received the callback.
   const operatorOpenId = data?.operator?.open_id;
+  if (value?.action === 'terminal_device_approve') {
+    const ds = larkAppId && typeof value.root_id === 'string'
+      ? getSessionByActionValue(activeSessions, value.root_id, larkAppId, value.session_id, value.action)
+      : undefined;
+    if (!ds || ds.larkAppId !== larkAppId || ds.session.sessionId !== value.session_id || typeof value.code !== 'string') {
+      return { toast: { type: 'warning', content: '配对卡片不属于当前会话或已失效。' } };
+    }
+    const result = approveTerminalDevice({ larkAppId: ds.larkAppId, sessionId: ds.session.sessionId, code: value.code, operatorId: operatorOpenId });
+    return { toast: { type: result.ok ? 'success' : 'warning', content: result.message } };
+  }
   // ─── 机器过载告警卡动作（overload_clean_stopped / overload_suspend_idle / noop）──
   // 不绑 session。owner 强闸门 + nonce 一次性核销（每按钮各一次，防重复点/超时重投/旧卡）。
   // 点完不替换成死卡：重建同一张卡，把点过的按钮标 done+数量并 disabled，另一个仍可点。

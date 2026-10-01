@@ -1,3 +1,7 @@
+import {HerdrSharedInput} from './herdr-shared-input.js';
+import type {HerdrWebTarget} from '../../utils/herdr-web-stream.js';
+import {codebuddySession} from '../../services/codebuddy-transcript.js';
+import {inspectHerdrKimiSource, inspectHerdrKimiOwner, type KimiNativeSource, type KimiNativeOwner} from '../../services/kimi-native-failure.js';
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -12,6 +16,7 @@ const { Terminal } = xtermHeadless;
 export type PersistentBackendType = Exclude<BackendType, 'pty'>;
 
 export interface HerdrExternalTarget {
+  guardInput?: boolean;
   sessionName: string;
   target: string;
   paneId?: string;
@@ -183,6 +188,14 @@ function paneAgentKindForExecutable(bin: string): string | undefined {
 
 function environmentForPaneAgent(bin: string, childEnv: Record<string, string> | undefined): Record<string, string> {
   const env = { ...(childEnv ?? {}) };
+  if (basename(bin) === 'codebuddy') {
+    for (const key of Object.keys(env)) {
+      if ((key.startsWith('CODEBUDDY_') && !['CODEBUDDY_API_KEY', 'CODEBUDDY_BASE_URL', 'CODEBUDDY_MODEL'].includes(key))
+          || key.startsWith('CODEX_') || key === 'CLAUDECODE' || key === 'CLAUDE_CODE_SESSION_ID') delete env[key];
+    }
+    env.TERM_PROGRAM = 'herdr';
+    delete env.TERM_PROGRAM_VERSION;
+  }
   if (!isAbsolute(bin)) return env;
   const binDir = dirname(bin);
   const currentPath = env.PATH ?? process.env.PATH ?? '';
@@ -200,7 +213,7 @@ function shellSingleQuote(value: string): string {
  *
  * Run this script by absolute path so interactive shell rc files cannot
  * shadow it by prepending real CLI directories to PATH. The mode-0700 script
- * restores the launch PATH and execs the full command, including wrappers and
+ * restores the launch environment and execs the full command, including wrappers and
  * multiline prompts. It removes itself before exec; the backend also cleans
  * up when automatic agent detection succeeds or any launch step fails.
  */
@@ -208,23 +221,30 @@ function createPaneAgentLauncher(
   canonicalExecutable: string,
   bin: string,
   args: string[],
-  originalPath: string,
+  environment: Record<string, string>,
 ): { dir: string; path: string } {
   const dir = mkdtempSync(join(tmpdir(), 'botmux-herdr-launch-'));
   const path = join(dir, canonicalExecutable);
-  const command = [bin, ...args].map(shellSingleQuote).join(' ');
-  writeFileSync(path, [
-    '#!/bin/sh',
-    // Minimise the lifetime of the mode-0700 file containing the exact argv.
-    // The backend's finally block is the fallback if Herdr never executes it.
-    '/bin/rm -f -- "$0"',
-    '/bin/rmdir -- "${0%/*}" 2>/dev/null || true',
-    `PATH=${shellSingleQuote(originalPath)}`,
-    'export PATH',
-    `exec ${command}`,
-    '',
-  ].join('\n'), { mode: 0o700 });
-  return { dir, path };
+  try {
+    const command = [bin, ...args].map(shellSingleQuote).join(' ');
+    writeFileSync(path, [
+      '#!/bin/sh',
+      // Credentials live only in this private file and the child environment.
+      // The backend's finally block is the fallback if Herdr never executes it.
+      '/bin/rm -f -- "$0"',
+      '/bin/rmdir -- "${0%/*}" 2>/dev/null || true',
+      ...Object.entries(environment).map(([key, value]) => {
+        if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) throw new Error('Invalid Herdr launch environment key');
+        return `export ${key}=${shellSingleQuote(value)}`;
+      }),
+      `exec ${command}`,
+      '',
+    ].join('\n'), { mode: 0o700 });
+    return { dir, path };
+  } catch (error) {
+    rmSync(dir, { recursive: true, force: true });
+    throw error;
+  }
 }
 
 function envCommandArgs(env: Record<string, string>): string[] {
@@ -331,6 +351,13 @@ function longestSuffixPrefix(previous: string, next: string): number {
 }
 
 export class HerdrBackend implements SessionBackend {
+  /** Legacy agent start passes shared-pane environment values in argv. */
+  static assertProtectedEnvironmentLaunch(): void {
+    if (!herdrUsesManagedAgentFacade()) {
+      throw new Error('KLL requires Herdr >=0.7.5 for a protected launch environment');
+    }
+  }
+
   private serverProcess: ChildProcess | null = null;
   private pollTimer: NodeJS.Timeout | null = null;
   private statusWaitProcesses: ChildProcess[] = [];
@@ -521,6 +548,10 @@ export class HerdrBackend implements SessionBackend {
     if (external) {
       this.actuallyReattached = false;
       this.paneId = external.paneId ?? external.target;
+      if(external.guardInput) {
+        this.sharedBoundary=new HerdrSharedInput(this.sessionName,this.paneId);
+        this.sharedBoundary.pin();
+      }
     } else {
       // Reuse an existing `botmux` agent ONLY when we're genuinely re-attaching
       // to a still-alive session (daemon restart while the herdr server kept
@@ -573,6 +604,15 @@ export class HerdrBackend implements SessionBackend {
       }
     }
 
+    if (basename(opts.cliBin ?? bin) === 'codebuddy' && !external && this.paneId) {
+      this.sharedBoundary = new HerdrSharedInput(this.sessionName, this.paneId);
+      this.cliPid = this.sharedBoundary.pin();
+      const native = this.cliPid ? codebuddySession(this.cliPid) : undefined;
+      const identityFlag = args.findIndex(arg => arg === '--session-id' || arg === '--resume');
+      if (!native || identityFlag < 0 || native.sessionId !== args[identityFlag + 1] || native.cwd !== opts.cwd) {
+        throw new Error('CodeBuddy 接入身份与请求的原生会话不一致；未连接替代会话。');
+      }
+    }
     this.started = true;
     // Baseline policy mirrors the tmux/PTY backends:
     //   - Fresh spawn: lastText='' so the first poll emits everything from
@@ -586,7 +626,31 @@ export class HerdrBackend implements SessionBackend {
     this.startStatusWatcher();
   }
 
+  private sharedInput?: HerdrSharedInput;
+  private sharedBoundary?: HerdrSharedInput;
+
+  sharedWebTarget(): HerdrWebTarget | undefined {
+    const boundary = this.sharedBoundary;
+    if (!boundary) return;
+    return {session: this.sessionName, terminalId: boundary.getTerminalId(), verify: () => {
+      if (this.exited || this.sharedBoundary !== boundary) throw new Error('原共享会话已变化。');
+      boundary.verify();
+    }};
+  }
+
+  async acquireSharedInput(): Promise<(() => Promise<void>) | undefined> {
+    if(!this.sharedBoundary)return;
+    if(this.sharedInput)throw new Error('共享输入仍在发送，未重复发送。');
+    const input=this.sharedBoundary;
+    if(!input)throw new Error('原共享会话身份未知。');
+    this.sharedInput=input;
+    try {await input.acquire();}catch(error){this.sharedInput=undefined;throw error;}
+    return async()=>{await input.release();if(this.sharedInput===input)this.sharedInput=undefined;};
+  }
+
   write(data: string): boolean {
+    if(this.sharedInput)return this.sharedInput.write(data);
+    if(this.sharedBoundary)return false;
     if (this.exited) return false;
     const target = this.paneId ?? this.agentName;
     return runHerdr(
@@ -596,10 +660,13 @@ export class HerdrBackend implements SessionBackend {
   }
 
   sendText(text: string): boolean {
+    if(this.sharedInput)return this.sharedInput.text(text);
     return this.write(text);
   }
 
   sendSpecialKeys(...keys: string[]): boolean {
+    if(this.sharedInput)return this.sharedInput.keys(keys);
+    if(this.sharedBoundary)return false;
     if (this.exited) return false;
     const target = this.paneId ?? this.agentName;
     return runHerdr(
@@ -609,7 +676,7 @@ export class HerdrBackend implements SessionBackend {
   }
 
   pasteText(text: string): boolean {
-    return this.write(text);
+    return this.sendText(text);
   }
 
   resize(cols: number, rows: number): void {
@@ -702,6 +769,7 @@ export class HerdrBackend implements SessionBackend {
   }
 
   kill(): void {
+    this.sharedInput?.release();this.sharedInput=undefined;
     if (this.exited) return;
     this.exited = true;
     this.resetWebTerminal();
@@ -711,6 +779,7 @@ export class HerdrBackend implements SessionBackend {
   }
 
   destroySession(): void {
+    this.sharedInput?.release();this.sharedInput=undefined;
     this.kill();
     // Adopted targets are observation-only. A managed agent placed in a user's
     // existing session owns its pane but never the surrounding herdr session.
@@ -727,6 +796,16 @@ export class HerdrBackend implements SessionBackend {
 
   getChildPid(): number | null {
     return this.cliPid ?? null;
+  }
+
+  getKimiNativeSource(): KimiNativeSource | undefined {
+    if (this.exited) return;
+    return inspectHerdrKimiSource(this.sessionName, this.agentName, this.cliPid);
+  }
+
+  getKimiNativeOwner(): KimiNativeOwner | undefined {
+    if (this.exited) return;
+    return inspectHerdrKimiOwner(this.sessionName, this.agentName, this.cliPid);
   }
 
   getAttachInfo() {
@@ -784,7 +863,10 @@ export class HerdrBackend implements SessionBackend {
     // Identify the managed kind by the original CLI; the launcher still
     // executes the complete wrapped command.
     const cliBin = opts.cliBin ?? bin;
-    const kind = paneAgentKindForExecutable(cliBin);
+    // CodeBuddy is an ordinary terminal process, reported under its own label.
+    // This does not add or impersonate a built-in Herdr agent kind.
+    const isCodeBuddy = basename(cliBin) === 'codebuddy';
+    const kind = isCodeBuddy ? 'codebuddy' : paneAgentKindForExecutable(cliBin);
     if (!kind) {
       throw new Error(
         `Herdr >=0.7.5 cannot launch executable "${basename(cliBin)}" as a managed coding agent; ` +
@@ -792,7 +874,6 @@ export class HerdrBackend implements SessionBackend {
       );
     }
     const workspaceEnv = environmentForPaneAgent(cliBin, this.childEnv);
-    const originalPath = workspaceEnv.PATH ?? process.env.PATH ?? '';
     let workspaceId: string | undefined;
     let launcher: ReturnType<typeof createPaneAgentLauncher> | undefined;
     try {
@@ -803,7 +884,6 @@ export class HerdrBackend implements SessionBackend {
           '--cwd', opts.cwd,
           '--label', this.agentName,
           '--no-focus',
-          ...envCommandArgs(workspaceEnv),
         ]),
         { timeout: 10_000, env: this.childEnv },
       );
@@ -813,7 +893,7 @@ export class HerdrBackend implements SessionBackend {
         throw new Error(`herdr workspace create for ${this.agentName} in ${this.sessionName} failed: missing root pane`);
       }
 
-      launcher = createPaneAgentLauncher(basename(cliBin), bin, args, originalPath);
+      launcher = createPaneAgentLauncher(basename(cliBin), bin, args, workspaceEnv);
       requiredJsonCommand(
         `herdr pane run ${paneId} in ${this.sessionName}`,
         // One quoted COMMAND argument reaches the shell verbatim, even while
@@ -821,6 +901,32 @@ export class HerdrBackend implements SessionBackend {
         herdrSessionArgs(this.sessionName, ['pane', 'run', paneId, shellSingleQuote(launcher.path)]),
         { timeout: 5000, env: this.childEnv, allowEmpty: true },
       );
+
+      if (isCodeBuddy) {
+        const deadline = Date.now() + PANE_AGENT_START_TIMEOUT_MS;
+        let native: ReturnType<typeof codebuddySession>;
+        while (Date.now() < deadline) {
+          const info = requiredJsonCommand('CodeBuddy process identity',
+            herdrSessionArgs(this.sessionName, ['pane', 'process-info', '--pane', paneId]));
+          const processes = info?.result?.process_info?.foreground_processes ?? [];
+          const candidates = processes.filter((p: any) => (p.argv ?? [p.argv0]).some((arg: unknown) =>
+            typeof arg === 'string' && basename(arg) === 'codebuddy'));
+          if (candidates.length === 1 && (native = codebuddySession(candidates[0].pid))) {
+            const identityFlag = args.findIndex(arg => arg === '--session-id' || arg === '--resume');
+            if (identityFlag < 0 || native.sessionId !== args[identityFlag + 1] || native.cwd !== opts.cwd) {
+              throw new Error('CodeBuddy 启动身份与请求的原生会话不一致；未连接替代会话。');
+            }
+            this.cliPid = candidates[0].pid;
+            break;
+          }
+          sleepSync(PANE_AGENT_DETECTION_POLL_MS);
+        }
+        if (!native) throw new Error('CodeBuddy 原生进程身份尚未确认。');
+        requiredJsonCommand('Report CodeBuddy terminal identity', herdrSessionArgs(this.sessionName, [
+          'pane', 'report-agent', paneId, '--source', 'botmux-codebuddy', '--agent', 'codebuddy',
+          '--state', 'unknown', '--agent-session-id', native.sessionId,
+        ]), {allowEmpty:true});
+      }
 
       const detectionDeadline = Date.now() + PANE_AGENT_START_TIMEOUT_MS;
       let detected = false;
@@ -972,14 +1078,14 @@ export class HerdrBackend implements SessionBackend {
   private readVisibleAnsi(): string {
     const target = this.paneId ?? this.agentName;
     return readHerdrTextCommand(
-      herdrSessionArgs(this.sessionName, ['agent', 'read', target, '--source', 'visible', '--lines', String(this.rows), '--format', 'ansi']),
+      herdrSessionArgs(this.sessionName, [this.sharedBoundary?'pane':'agent', 'read', target, '--source', 'visible', '--lines', String(this.rows), '--format', 'ansi']),
     );
   }
 
   private readRecentAnsi(): string {
     const target = this.paneId ?? this.agentName;
     return readHerdrTextCommand(
-      herdrSessionArgs(this.sessionName, ['agent', 'read', target, '--source', 'recent', '--lines', String(READ_LINES), '--format', 'ansi']),
+      herdrSessionArgs(this.sessionName, [this.sharedBoundary?'pane':'agent', 'read', target, '--source', 'recent', '--lines', String(READ_LINES), '--format', 'ansi']),
     );
   }
 
@@ -996,11 +1102,31 @@ export class HerdrBackend implements SessionBackend {
 
   private poll(): void {
     if (this.exited) return;
+    if(this.sharedBoundary) {
+      try {this.sharedBoundary?.verify();this.readAndEmitDelta();}
+      catch {this.handleExit(0,null);}
+      return;
+    }
     const agents = this.listAgents();
     if (agents === null) {
       this.agentProbeFailures++;
       if (this.agentProbeFailures < MAX_AGENT_PROBE_FAILURES) return;
-      this.handleExit(0, null);
+      // `agent list` failing is a PROBE failure — a busy shared herdr server or
+      // socket contention under concurrent daemons — not evidence that the CLI
+      // died. Reporting an exit here kills a healthy CLI and visibly restarts
+      // the session (first-turn launches are especially exposed: the spawn's
+      // own detection/rename `agent list` calls contend with the very first
+      // polls). Confirm through an independent channel before declaring exit:
+      // the whole host session vanishing means the pane — and the CLI with it —
+      // is really gone. Otherwise keep polling; a real exit still surfaces via
+      // the row-absence path below once a list call succeeds again.
+      this.agentProbeFailures = 0;
+      if (HerdrBackend.probeSession(this.sessionName) === 'missing') {
+        logger.warn(`[herdr-backend] agent list failed ${MAX_AGENT_PROBE_FAILURES}x and session ${this.sessionName} is gone; reporting CLI exit`);
+        this.handleExit(0, null);
+        return;
+      }
+      logger.warn(`[herdr-backend] agent list failed ${MAX_AGENT_PROBE_FAILURES}x for session ${this.sessionName} but the session still exists; keeping the CLI alive and retrying`);
       return;
     }
     this.agentProbeFailures = 0;
@@ -1059,7 +1185,7 @@ export class HerdrBackend implements SessionBackend {
    * machine so settled statuses are eligible again on the next turn.
    */
   private startStatusWatcher(currentStatus?: WatchedStatus): void {
-    if (this.exited) return;
+    if (this.exited || (this.opts.externalTarget?.guardInput && !this.getAgent())) return;
     const paneTarget = this.paneId ?? this.agentName;
     if (!paneTarget) return;
     this.stopStatusWatcher();

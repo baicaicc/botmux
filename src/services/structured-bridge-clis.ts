@@ -17,6 +17,7 @@ import type { CliId } from '../adapters/cli/types.js';
 
 /** Always-on structured-bridge CLIs (including SQLite-backed hermes/mtr). */
 export const STRUCTURED_BRIDGE_ALWAYS_CLI_IDS = [
+  'codebuddy',
   'codex',
   'traex',
   'coco',
@@ -39,6 +40,7 @@ export const STRUCTURED_BRIDGE_ALWAYS_CLI_IDS = [
  *  driver-table follow-up, not this convergence PR. Matches the historical
  *  worker-pool allowlist. */
 export const STRUCTURED_BRIDGE_ADOPT_CLI_IDS = [
+  'codebuddy',
   'codex',
   'traex',
   'coco',
@@ -74,6 +76,7 @@ const ADOPT_SET: ReadonlySet<string> = new Set(STRUCTURED_BRIDGE_ADOPT_CLI_IDS);
  *  use the queue for attribution, but their interrupted/error shapes are not
  *  yet complete enough to let a started turn suppress screen-ready forever. */
 export const STRUCTURED_BRIDGE_LIFECYCLE_BLOCKING_CLI_IDS = [
+  'codebuddy',
   'codex',
   'pi',
   'oh-my-pi',
@@ -110,6 +113,7 @@ export function isStructuredBridgeAdoptCli(cliId: string | undefined): boolean {
  * `adoptIdleAdapter` allowlist: codex/traex/coco/mtr/pi/grok.
  */
 export const STRUCTURED_BRIDGE_ADOPT_IDLE_CLI_IDS = [
+  'codebuddy',
   'codex',
   'traex',
   'coco',
@@ -126,6 +130,7 @@ export function isStructuredBridgeAdoptIdleCli(cliId: string | undefined): boole
 
 /** Adopt input adapter: needs writeInput for local pane typing. */
 export const STRUCTURED_BRIDGE_ADOPT_INPUT_CLI_IDS = [
+  'codebuddy',
   'codex',
   'traex',
   'coco',

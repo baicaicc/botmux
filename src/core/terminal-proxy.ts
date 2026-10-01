@@ -40,7 +40,21 @@ export interface TerminalProxyOptions {
   ensureWorkerPort?: (sessionId: string) => Promise<number | undefined>;
   /** Max upward port probes when `port` is taken (EADDRINUSE). Default 20; 0 disables. */
   maxProbe?: number;
+  /** Optional application guard. Runs before resolving or waking a worker. */
+  authorizeRequest?: (request: TerminalProxyRequest) => Promise<TerminalProxyAuthorization>;
 }
+
+export interface TerminalProxyRequest {
+  method: string;
+  sessionId: string;
+  rest: string;
+  headers: string[];
+  isUpgrade: boolean;
+}
+
+export type TerminalProxyAuthorization =
+  | { kind: 'response'; status: number; headers: Record<string, string>; body: string }
+  | { kind: 'forward'; rest: string; headers: string[]; isAuthorized?: () => boolean };
 
 export interface TerminalProxyHandle {
   port: number;
@@ -137,6 +151,7 @@ export function startTerminalProxy(opts: TerminalProxyOptions): Promise<Terminal
         if (preamble.length > REQUEST_LINE_CAP) { routed = true; clearTimeout(routeTimer); client.destroy(); }
         return; // keep buffering until the full header block arrives
       }
+      if (headerEnd > REQUEST_LINE_CAP) { routed = true; clearTimeout(routeTimer); client.destroy(); return; }
       routed = true;
       clearTimeout(routeTimer);
       client.removeListener('data', onData);
@@ -160,17 +175,36 @@ export function startTerminalProxy(opts: TerminalProxyOptions): Promise<Terminal
       // stays open for the upgraded protocol (a single request per connection —
       // no keep-alive reuse), so forward the headers as-is (they carry the
       // Upgrade/Connection/Sec-WebSocket-* handshake the worker needs).
-      const headerLines = headerBlock.length ? headerBlock.split('\r\n') : [];
+      let headerLines = headerBlock.length ? headerBlock.split('\r\n') : [];
       const isUpgrade = headerLines.some((l) => /^upgrade\s*:/i.test(l));
 
-      resolvePortMaybeWake(parsed.sessionId).then((port) => {
+      const route = async () => {
+        let rest = parsed.rest;
+        let authorized: (() => boolean) | undefined;
+        if (opts.authorizeRequest) {
+          const decision = await opts.authorizeRequest({
+            method: parsedLine.method, sessionId: parsed.sessionId, rest,
+            headers: headerLines, isUpgrade,
+          });
+          if (decision.kind === 'response') {
+            const reasons: Record<number, string> = { 200: 'OK', 303: 'See Other', 400: 'Bad Request', 403: 'Forbidden', 404: 'Not Found', 405: 'Method Not Allowed', 503: 'Service Unavailable' };
+            const head = Object.entries(decision.headers).map(([key, value]) => `${key}: ${value}`).join('\r\n');
+            client.end(`HTTP/1.1 ${decision.status} ${reasons[decision.status] ?? 'Response'}\r\n${head}\r\nContent-Length: ${Buffer.byteLength(decision.body)}\r\nConnection: close\r\n\r\n${parsedLine.method === 'HEAD' ? '' : decision.body}`);
+            return;
+          }
+          rest = decision.rest;
+          headerLines = decision.headers;
+          authorized = decision.isAuthorized;
+        }
+        const port = await resolvePortMaybeWake(parsed.sessionId);
         if (!port) {
           writeHttpError(client, 502, 'Bad Gateway', 'session not running');
           return;
         }
+        if (authorized && !authorized()) { writeHttpError(client, 403, 'Forbidden', 'authorization expired'); return; }
 
         // Rewrite ONLY the request-target (strip the `/s/{sessionId}` prefix).
-        const rewrittenLine = `${parsedLine.method} ${parsed.rest} ${parsedLine.version}`;
+        const rewrittenLine = `${parsedLine.method} ${rest} ${parsedLine.version}`;
         let forwardedHeaders: string[];
         if (isUpgrade) {
           forwardedHeaders = headerLines; // verbatim — preserve the WS handshake
@@ -193,6 +227,13 @@ export function startTerminalProxy(opts: TerminalProxyOptions): Promise<Terminal
           upstream.pipe(client);
           client.pipe(upstream);
         });
+        // Device/session revocation also closes already-open streams. The native
+        // controller belongs to this stream and is released by its normal EOF.
+        const authorizationTimer = isUpgrade && authorized
+          ? setInterval(() => { if (!authorized!()) { upstream.destroy(); client.destroy(); } }, 5_000)
+          : undefined;
+        authorizationTimer?.unref?.();
+        client.once('close', () => { if (authorizationTimer) clearInterval(authorizationTimer); });
         const cleanup = () => { upstream.destroy(); client.destroy(); };
         upstream.on('error', () => {
           if (!client.destroyed) writeHttpError(client, 502, 'Bad Gateway', 'proxy error');
@@ -205,7 +246,8 @@ export function startTerminalProxy(opts: TerminalProxyOptions): Promise<Terminal
           if (!upstream.readableEnded) client.destroy();
         });
         client.on('close', () => upstream.destroy());
-      }).catch(() => {
+      };
+      route().catch(() => {
         if (!client.destroyed) writeHttpError(client, 502, 'Bad Gateway', 'proxy error');
       });
     };

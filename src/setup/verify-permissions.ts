@@ -39,6 +39,22 @@ export type CriticalScopeReadbackResult =
   | { ok: true; granted: string[]; missingCritical: RequiredScope[] }
   | { ok: false; error: 'invalid_credentials' | 'need_self_manage' | 'network' | 'unknown'; message: string };
 
+/** The message operations used by the core bot flow: send, read and update. */
+export const BOTMUX_MESSAGE_NARROW_SCOPES = [
+  'im:message:send_as_bot',
+  'im:message:readonly',
+  'im:message:update',
+] as const;
+
+/** Recognize the narrow message bundle without granting unrelated features. */
+export function isScopeGranted(name: string, granted: ReadonlySet<string>): boolean {
+  return granted.has(name)
+    || (name === 'im:message' && BOTMUX_MESSAGE_NARROW_SCOPES.every(scope => granted.has(scope)))
+    // Legacy contact-base permission can read user basics. The reverse is not
+    // true: a narrow user permission does not grant the wider contact surface.
+    || (name === 'contact:user.base:readonly' && granted.has('contact:contact.base:readonly'));
+}
+
 /**
  * botmux 运行所需的 scope. 这里**只用于检测/提示**, 不用于自动申请——飞书
  * `scope.apply` 只能提交"已声明但未授权"的, 没法给应用 manifest 加新声明.
@@ -52,6 +68,12 @@ export type CriticalScopeReadbackResult =
 export const BOTMUX_REQUIRED_SCOPES: RequiredScope[] = [
   { name: 'im:message', desc: '收发消息', critical: true },
   { name: 'im:message.group_at_msg:readonly', desc: '群消息接收', critical: true },
+  // 用户→bot 单聊（P2P DM）的接收。缺它时用户私聊 bot 的消息不会经 im.message.receive_v1
+  // 投递到 WSClient，且没有替代 scope（im:message 只覆盖发送；group_* 只覆盖群）。单聊与
+  // 群消息接收同级、都是核心入口，标 critical：新 bot 缺它时 setup 回读不 ready、启动
+  // 自检直接 DM 管理员。此前该 scope 只在 lark-scopes.json 创建申请集里、不在核验集里，
+  // 出现缺口时不会有任何告警（2026-09-30 排查确认现有应用实际都已授权）。
+  { name: 'im:message.p2p_msg:readonly', desc: '单聊消息接收（用户私聊 bot）', critical: true },
   // 没有这个 scope，listChatMessages（container_id_type=chat）只能拿到 @bot 的
   // 消息，拉不到群里的全量历史，botmux history / 群上下文回溯失效。标 critical 是
   // 为了让启动自检在它缺失时也会 DM 管理员——非 critical 的缺失只在同时缺别的
@@ -300,18 +322,25 @@ export async function readCriticalScopesFromApplicationInfo(
         message: `application info failed: code=${infoData?.code ?? '?'} msg=${infoData?.msg ?? ''}`,
       };
     }
-    const scopesRaw: any[] = infoData.data?.app?.scopes
+    const scopesRaw: unknown = infoData.data?.app?.scopes
       ?? infoData.data?.application?.scopes
       ?? infoData.data?.scopes
       ?? [];
-    const granted = [...new Set(
-      scopesRaw.map(scope => typeof scope === 'string' ? scope : scope?.scope).filter(Boolean) as string[],
-    )];
+    if (!Array.isArray(scopesRaw) || scopesRaw.length === 0) {
+      return { ok: false, error: 'unknown', message: 'application info scope readback inconclusive' };
+    }
+    const names: unknown[] = scopesRaw.map(scope => typeof scope === 'string' ? scope : scope?.scope);
+    // Scope names are opaque platform identifiers: offline_access is valid
+    // without a namespace. Reject bad shapes, not unfamiliar scope syntax.
+    if (names.some(name => typeof name !== 'string' || name.length === 0 || /[\s\u0000-\u001f\u007f]/.test(name))) {
+      return { ok: false, error: 'unknown', message: 'application info scope readback inconclusive' };
+    }
+    const granted = [...new Set(names as string[])];
     const grantedSet = new Set(granted);
     return {
       ok: true,
       granted,
-      missingCritical: BOTMUX_REQUIRED_SCOPES.filter(scope => scope.critical && !grantedSet.has(scope.name)),
+      missingCritical: BOTMUX_REQUIRED_SCOPES.filter(scope => scope.critical && !isScopeGranted(scope.name, grantedSet)),
     };
   } catch (err: any) {
     return {
@@ -393,8 +422,9 @@ export async function checkRequiredScopes(
     .filter((s: any) => s?.grant_status === 2 && typeof s?.scope_name === 'string')
     .map((s: any) => s.scope_name);
 
-  const missingCritical = BOTMUX_REQUIRED_SCOPES.filter(s => s.critical && !grantedNames.includes(s.name));
-  const missingOptional = BOTMUX_REQUIRED_SCOPES.filter(s => !s.critical && !grantedNames.includes(s.name));
+  const grantedSet = new Set(grantedNames);
+  const missingCritical = BOTMUX_REQUIRED_SCOPES.filter(s => s.critical && !isScopeGranted(s.name, grantedSet));
+  const missingOptional = BOTMUX_REQUIRED_SCOPES.filter(s => !s.critical && !isScopeGranted(s.name, grantedSet));
 
   return { ok: true, granted: grantedNames, missingCritical, missingOptional };
 }

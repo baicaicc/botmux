@@ -1,3 +1,4 @@
+import {createCodeBuddyAdapter} from './codebuddy.js';
 import { spawnSync } from 'node:child_process';
 import { existsSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -43,6 +44,7 @@ import { createMinimaxAdapter } from './minimax.js';
  * instantiate the adapter and trigger its lazy `resolvedBin` shell probes.
  */
 const RAW_CLI_EXECUTABLES: Readonly<Record<CliId, string | undefined>> = {
+  codebuddy: 'codebuddy',
   'claude-code': 'claude',
   seed: 'seed',
   relay: 'relay',
@@ -232,6 +234,7 @@ export { createClaudeCodeAdapter, createSeedAdapter, createRelayAdapter, createA
 /** Synchronous version for use in worker process. */
 export function createCliAdapterSync(id: CliId, pathOverride?: string): CliAdapter {
   switch (id.toLowerCase() as CliId) {
+    case 'codebuddy': return createCodeBuddyAdapter(pathOverride);
     case 'claude-code': return createClaudeCodeAdapter(pathOverride);
     case 'seed': return createSeedAdapter(pathOverride);
     case 'relay': return createRelayAdapter(pathOverride);
@@ -266,3 +269,5 @@ export function createCliAdapterSync(id: CliId, pathOverride?: string): CliAdapt
     default: throw new Error(`Unknown CLI adapter: ${id}`);
   }
 }
+
+export {createCodeBuddyAdapter} from './codebuddy.js';

@@ -10,7 +10,7 @@
  *   botmux start [--companion-secret-file <path> --companion-bot <appId>]
  *                         — start daemon and optionally its closed local companion API
  *   botmux stop [--with-plugin] — stop daemon (optionally stop auto plugin services)
- *   botmux restart [--with-plugin] [--companion-secret-file <path> --companion-bot <appId>]
+ *   botmux restart [--bot <index|name|appId>] [--with-plugin] [--companion-secret-file <path> --companion-bot <appId>]
  *                         — restart daemon, then ensure auto plugin services
  *   botmux logs [--lines] [--bot <i>] [--no-follow] — view/stream per-bot daemon logs
  *   botmux model-proxy serve --config <path> — authenticated local model protocol
@@ -93,6 +93,11 @@ import {
   setupOpenPlatformRetryCommand,
   type SetupOpenPlatformOutcome,
 } from './setup/open-platform-outcome.js';
+import {
+  configureLarkPermissionReadiness,
+  readSetupPermissionReadiness,
+  setupPermissionBlockedMessage,
+} from './setup/permission-readiness.js';
 import {
   buildBotFromAddFlags,
   editInputFromFlags,
@@ -1649,7 +1654,7 @@ function botJsonView(bot: Record<string, any>, index: number): Record<string, an
  * 的老姿势在问题序列变化时会静默错位）。校验口径与 TUI 一致：目录存在性、
  * owner 必填、凭证变更时的 tenant_access_token 校验，任一失败不写盘。
  */
-async function cmdSetupScripted(
+export async function cmdSetupScripted(
   argv: string[],
   cloneSource?: Record<string, any>,
 ): Promise<void> {
@@ -1690,12 +1695,18 @@ async function cmdSetupScripted(
     }
     const bot = bots[index];
     const processName = botProcessName(bot, index, PM2_NAME);
-    const openPlatform = await finishOpenPlatformSetup(bot.larkAppId, botBrand(bot), {
+    const permissionBot = { larkAppId: bot.larkAppId, larkAppSecret: bot.larkAppSecret, brand: botBrand(bot) };
+    const openPlatform: SetupOpenPlatformOutcome = botBrand(bot) === 'lark'
+      ? { status: 'skipped' }
+      : await finishOpenPlatformSetup(bot.larkAppId, botBrand(bot), {
       // Machine-readable callers must never be surprised by an interactive QR.
       reuseOnly: cmd.json && !cmd.switchAccount,
       forceQrLogin: cmd.switchAccount,
       quiet: cmd.json,
     });
+    const permissions = botBrand(bot) === 'lark'
+      ? await configureLarkPermissionReadiness(permissionBot, { json: cmd.json })
+      : await readSetupPermissionReadiness(permissionBot);
     if (openPlatform.status === 'failed' || openPlatform.status === 'manual') {
       const continueCommand = setupOpenPlatformRetryCommand(bot.larkAppId, openPlatform);
       const next = continueCommand ?? 'manual_open_platform_setup';
@@ -1710,10 +1721,21 @@ async function cmdSetupScripted(
           bot: botJsonView(bot, index),
           appId: bot.larkAppId,
           openPlatform: setupOpenPlatformOutcomeJson(openPlatform),
+          permissions,
           ...(continueCommand ? { continueCommand } : {}),
           next,
         },
       );
+      return;
+    }
+    if (permissions.status !== 'ready') {
+      failSetupScripted(cmd.json, setupPermissionBlockedMessage(permissions), {
+        partial: true, action: 'configure', bot: botJsonView(bot, index), appId: bot.larkAppId,
+        openPlatform: setupOpenPlatformOutcomeJson(openPlatform), permissions,
+        continueCommand: permissions.continueCommand,
+        live: { ok: false, reason: 'permissions_incomplete', message: '关键权限未确认生效，未启动新机器人' },
+        next: permissions.continueCommand,
+      });
       return;
     }
     const live = await ensureBotDaemonStarted(bot.larkAppId, { quiet: cmd.json });
@@ -1725,11 +1747,12 @@ async function cmdSetupScripted(
         bot: botJsonView(bot, index),
         appId: bot.larkAppId,
         openPlatform: setupOpenPlatformOutcomeJson(openPlatform),
+        permissions,
         live,
         next,
       }, null, 2));
     } else {
-      console.log(`✅ 已完成 ${processName} (${bot.larkAppId}) 的开放平台配置`);
+      console.log(`✅ ${processName} (${bot.larkAppId}) 的关键权限已确认生效`);
       if (live.ok) console.log(`✅ 已自动上线（${live.processName}）`);
       else if (live.reason === 'fleet_down') console.log('下一步: botmux start（daemon 尚未运行）');
       else console.log(`⚠️  自动上线失败（${live.message}）。下一步: botmux restart`);
@@ -2023,7 +2046,7 @@ async function cmdSetupScripted(
 
     // 已有凭证模式默认跳过；--create-app 默认开启并复用刚才的 Web session。
     let openPlatform: SetupOpenPlatformOutcome = { status: 'skipped' };
-    if (cmd.openPlatformAuto) {
+    if (cmd.openPlatformAuto && botBrand(bot) !== 'lark') {
       openPlatform = await finishOpenPlatformSetup(bot.larkAppId, botBrand(bot), {
         reuseOnly: scriptedSetupOpenPlatformReuseOnly({
           json: cmd.json,
@@ -2039,6 +2062,9 @@ async function cmdSetupScripted(
     }
 
     const index = existing.length;
+    const permissions = await readSetupPermissionReadiness({
+      larkAppId: bot.larkAppId, larkAppSecret: bot.larkAppSecret, brand: botBrand(bot),
+    });
     if (blocksSetupBotStart(openPlatform)) {
       const continueCommand = setupOpenPlatformRetryCommand(bot.larkAppId, openPlatform)!;
       failSetupScripted(
@@ -2053,6 +2079,7 @@ async function cmdSetupScripted(
           botsFile: BOTS_JSON_FILE,
           envMigrated: migratedEnv || undefined,
           openPlatform: setupOpenPlatformOutcomeJson(openPlatform),
+          permissions,
           continueCommand,
           live: {
             ok: false,
@@ -2062,6 +2089,18 @@ async function cmdSetupScripted(
           next: continueCommand,
         },
       );
+      return;
+    }
+    if (permissions.status !== 'ready') {
+      failSetupScripted(cmd.json, setupPermissionBlockedMessage(permissions), {
+        partial: true, action: 'add', bot: botJsonView(bot, index), appId: bot.larkAppId,
+        ...(createdAppName ? { appName: createdAppName } : {}),
+        botsFile: BOTS_JSON_FILE, envMigrated: migratedEnv || undefined,
+        openPlatform: setupOpenPlatformOutcomeJson(openPlatform), permissions,
+        continueCommand: permissions.continueCommand,
+        live: { ok: false, reason: 'permissions_incomplete', message: '关键权限未确认生效，未启动新机器人' },
+        next: permissions.continueCommand,
+      });
       return;
     }
     // daemon 在跑就直接把新 bot 那一个进程拉起来，免整组 botmux restart。
@@ -2077,6 +2116,7 @@ async function cmdSetupScripted(
         botsFile: BOTS_JSON_FILE,
         envMigrated: migratedEnv || undefined,
         openPlatform: setupOpenPlatformOutcomeJson(openPlatform),
+        permissions,
         live,
         next,
       }, null, 2));
@@ -2811,6 +2851,49 @@ interface RestartLifecycleFlags {
 
 
 async function cmdRestart(): Promise<void> {
+  const restartArgs = process.argv.slice(3);
+  const botRequested = hasFlagOrEq(restartArgs, '--bot');
+  const botSelector = argValue(restartArgs, '--bot');
+  if (botRequested && !botSelector) throw new Error('--bot 需要 Bot 索引、名称或 appId；未执行重启。');
+  const { readFleetStatus } = await import('./core/fleet-runtime.js');
+  const { readIndependentDaemonStatus, selectIndependentRestartTargets, restartIndependentLaunchdDaemons } = await import('./cli/independent-daemon-status.js');
+  const fleet = readFleetStatus();
+  const independent = readIndependentDaemonStatus(resolveDataDir());
+  const outsideFleet = independent.filter(row => row.status !== 'offline'
+    && !fleet.rows.some(member => member.appId === row.appId && member.pid === row.pid));
+  if (fleet.supervisorAlive && outsideFleet.length > 0) {
+    throw new Error('同时检测到 supervisor 与独立 daemon；请先核对管理归属，未执行重启。');
+  }
+  // Dead descriptors from a crashed supervised fleet must not prevent its
+  // existing recovery path. Unknown live records still block unsafe takeover.
+  if (!fleet.supervisorAlive && outsideFleet.length > 0) {
+    if (hasFlagOrEq(restartArgs, '--companion-secret-file') || hasFlagOrEq(restartArgs, '--companion-bot')) {
+      throw new Error('独立 launchd daemon 使用已加载 job 的环境；请在其 LaunchAgent 配置 companion，未执行重启。');
+    }
+    await withFileLock(PM2_FLEET_MUTATION_LOCK_TARGET, async () => {
+      await withFileLock(BOTS_JSON_FILE, async () => {
+        if (readFleetStatus().supervisorAlive) throw new Error('管理归属已改变；未执行重启。');
+        const bots = loadBotsJson();
+        const selectedIndex = botSelector === undefined ? undefined
+          : /^\d+$/.test(botSelector) ? Number(botSelector) : parseBotSelection(botSelector, bots);
+        if (botSelector !== undefined && (selectedIndex === undefined || !bots[selectedIndex])) {
+          throw new Error('未识别的 --bot 选择；未执行重启。');
+        }
+        const targets = selectIndependentRestartTargets(
+          readIndependentDaemonStatus(resolveDataDir()), bots.map(bot => bot.larkAppId),
+          selectedIndex === undefined ? undefined : bots[selectedIndex].larkAppId,
+        );
+        const restarted = await restartIndependentLaunchdDaemons(targets, {
+          dataDir: resolveDataDir(),
+          ...(restartArgs.includes('--with-plugin') ? { beforeRestart: async () => { await stopPluginServicesForCli(undefined, { autoOnly: true }); } } : {}),
+        });
+        if (restartArgs.includes('--with-plugin')) await reconcilePluginServicesForCli(undefined, { autoOnly: true });
+        console.log(`✅ 已重启 ${restarted.length} 个独立 launchd daemon，新的进程身份与 heartbeat 核验通过。`);
+      }, { maxWaitMs: 5_000 });
+    }, { maxWaitMs: 5_000 });
+    return;
+  }
+  if (botRequested) throw new Error('--bot 重启需要可核验的独立 launchd daemon；未执行重启。');
   applyCompanionOptions(process.argv.slice(3));
   const { refreshPersistedEnv, readFailureFallback } = prepareRestartDriverContext();
   if (!hasConfig()) {
@@ -3108,7 +3191,16 @@ async function cmdStopBot(argv: string[]): Promise<void> {
 /** Print the post-add "next step" line for interactive setup: auto-start the new
  *  bot's own daemon when the fleet is up (no fleet-wide restart), else fall back
  *  to the botmux start / restart hint. */
-async function printAddBotLiveHint(appId: string): Promise<void> {
+export async function printAddBotLiveHint(appId: string): Promise<void> {
+  const bot = loadBotsJson().find(current => current?.larkAppId === appId);
+  if (!bot) { console.error(`❌ AppID ${appId} 不在机器人配置中。`); return; }
+  const permissions = await readSetupPermissionReadiness({
+    larkAppId: bot.larkAppId, larkAppSecret: bot.larkAppSecret, brand: botBrand(bot),
+  });
+  if (permissions.status !== 'ready') {
+    console.error(`⚠️ ${setupPermissionBlockedMessage(permissions)}`);
+    return;
+  }
   const live = await ensureBotDaemonStarted(appId);
   if (live.ok) {
     console.log(`✅ 已自动上线（${live.processName}），无需重启其它机器人。\n`);
@@ -3254,7 +3346,21 @@ async function cmdLogs(): Promise<void> {
   }
 
   const files: string[] = [];
+  const { readFleetStatus } = await import('./core/fleet-runtime.js');
+  const { readIndependentDaemonStatus, readIndependentLaunchdLogPaths } = await import('./cli/independent-daemon-status.js');
+  const fleet = readFleetStatus();
+  const independent = readIndependentDaemonStatus(resolveDataDir());
   for (const i of indices) {
+    const direct = independent.find(row => row.appId === bots[i]?.larkAppId
+      && !fleet.rows.some(member => fleet.supervisorAlive && member.appId === row.appId && member.pid === row.pid));
+    if (direct) {
+      const paths = readIndependentLaunchdLogPaths(direct);
+      if (paths.length === 0) {
+        console.error(`ℹ️  ${direct.name} 的 loaded launchd 日志路径无法核验。`);
+      }
+      files.push(...paths);
+      continue;
+    }
     for (const kind of ['out', 'err'] as const) {
       const fp = join(logDir, `daemon-${i}-${kind}.log`);
       if (existsSync(fp)) files.push(fp);
@@ -3268,7 +3374,8 @@ async function cmdLogs(): Promise<void> {
   // Stream with `tail`: `-n <lines>` for the backlog, `-F` to follow across the
   // supervisor's log rotation/reopen on restart. Multiple files get `==> file`
   // banners from tail itself. `--no-follow` prints the backlog and exits.
-  const tailArgs = follow ? ['-n', lines, '-F', ...files] : ['-n', lines, ...files];
+  const uniqueFiles = [...new Set(files)];
+  const tailArgs = follow ? ['-n', lines, '-F', ...uniqueFiles] : ['-n', lines, ...uniqueFiles];
   const child = spawn('tail', tailArgs, { stdio: 'inherit' });
   child.on('error', (err) => {
     console.error(`❌ 无法运行 tail：${err instanceof Error ? err.message : err}`);
@@ -3281,6 +3388,14 @@ async function cmdStatus(): Promise<void> {
   warnIfLegacyBotmuxAlive();
   const { readFleetStatus } = await import('./core/fleet-runtime.js');
   const status = readFleetStatus();
+  const { readIndependentDaemonStatus, formatIndependentDaemonStatus } = await import('./cli/independent-daemon-status.js');
+  const independent = readIndependentDaemonStatus(resolveDataDir()).filter(row =>
+    !status.supervisorAlive || !status.rows.some(member => member.appId === row.appId && member.pid === row.pid));
+  if (independent.length > 0) {
+    for (const line of formatIndependentDaemonStatus(independent)) console.log(line);
+    if (!status.supervisorAlive) return;
+    console.log('');
+  }
   if (!status.supervisorAlive && status.rows.length === 0) {
     console.log('daemon 未在运行。（用 `botmux start` 启动）');
     return;
@@ -6589,7 +6704,7 @@ botmux v${getVersion()} — IM ↔ AI 编程 CLI 桥接
   start       启动 daemon，并启动 mode=auto 的插件 service
               可用 --companion-secret-file <绝对路径> --companion-bot <appId> 开启封闭本机 Companion API
   stop        停止 daemon（默认不停止插件 service；--with-plugin 显式停止 mode=auto 的插件 service）
-  restart     重启 daemon（同样接受 --companion-secret-file / --companion-bot；--with-plugin 显式先停再启动 auto service）
+  restart     重启 daemon（独立 launchd 可用 --bot 索引/名称精确选择；--with-plugin 同时重启 auto service）
   logs        查看/跟随 daemon 日志（--lines N, --bot <0-based-index|name|appId>, --no-follow 只打印不跟随）
   model-proxy serve --config <path>
               启动有鉴权的本机模型协议入口（Chat Completions 子集）
@@ -14690,11 +14805,11 @@ const ROOT_FLEET_MUTATION_COMMANDS = new Set(['start', 'stop', 'restart', 'upgra
 const FLEET_KNOWN_FLAGS: Record<string, readonly string[]> = {
   start: ['--companion-secret-file', '--companion-bot'],
   stop: ['--with-plugin'],
-  restart: ['--with-plugin', '--companion-secret-file', '--companion-bot'],
+  restart: ['--bot', '--with-plugin', '--companion-secret-file', '--companion-bot'],
   upgrade: [],
   update: [],
 };
-const FLEET_VALUE_FLAGS = new Set(['--companion-secret-file', '--companion-bot']);
+const FLEET_VALUE_FLAGS = new Set(['--bot', '--companion-secret-file', '--companion-bot']);
 if (ROOT_FLEET_MUTATION_COMMANDS.has(command ?? '')) {
   const fleetArgs = process.argv.slice(3);
   if (fleetArgs.some(arg => arg === '--help' || arg === '-h')) {

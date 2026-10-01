@@ -190,6 +190,11 @@ export interface CliAdapter {
      *  `--model` flag (or equivalent) inject it here; adapters whose CLI has no
      *  such concept simply ignore the field. Empty / undefined → CLI default. */
     model?: string;
+    /** KLL catalog model id when KLL owns this launch's model selection (the
+     *  selected cli model arrives via `model`). Adapters without a registered
+     *  KLL route ignore the field; dsh renders its per-session route overlay
+     *  from it and fails the spawn when no route matches. */
+    kllModelId?: string;
     /** Optional per-bot turn timeout in milliseconds for runner-based adapters
      *  (dsh). Forwarded as `--turn-timeout-ms` to override the runner default;
      *  adapters without a runner turn timeout ignore the field. */
@@ -772,4 +777,4 @@ export interface CliAdapter {
   buildSessionRenameCommand?(title: string): string;
 }
 
-export type CliId = 'claude-code' | 'seed' | 'relay' | 'aiden' | 'coco' | 'codex' | 'codex-app' | 'cursor' | 'gemini' | 'genius' | 'opencode' | 'opencode2' | 'antigravity' | 'mtr' | 'hermes' | 'mira' | 'mir' | 'traex' | 'pi' | 'copilot' | 'oh-my-pi' | 'ebsd' | 'kimi' | 'grok' | 'kiro-cli' | 'riff' | 'reasonix' | 'dsh' | 'dsh-tui' | 'mojo' | 'minimax';
+export type CliId = 'codebuddy' | 'claude-code' | 'seed' | 'relay' | 'aiden' | 'coco' | 'codex' | 'codex-app' | 'cursor' | 'gemini' | 'genius' | 'opencode' | 'opencode2' | 'antigravity' | 'mtr' | 'hermes' | 'mira' | 'mir' | 'traex' | 'pi' | 'copilot' | 'oh-my-pi' | 'ebsd' | 'kimi' | 'grok' | 'kiro-cli' | 'riff' | 'reasonix' | 'dsh' | 'dsh-tui' | 'mojo' | 'minimax';

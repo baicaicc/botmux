@@ -4,6 +4,7 @@
  * Extracted from daemon.ts for modularity.
  */
 import * as Lark from '@larksuiteoapi/node-sdk';
+import { isExternalTaskDm } from './external-task-dm.js';
 import { startLarkConnection } from './transport/connection.js';
 import { readFileSync, mkdirSync, existsSync } from 'node:fs';
 import { atomicWriteFileSync } from '../../utils/atomic-write.js';
@@ -29,6 +30,7 @@ import { isPlatformTeamBot, isPlatformHallChat, isPlatformTeamMember } from '../
 import { getBotUnionId, recordBotUnionId, recordBotUnionIdFromMentions } from '../../services/bot-union-ids-store.js';
 import { docWatchAnchor, getDocSubscription, putDocSubscription, removeDocSubscription, listAllDocSubscriptions, settleDocCommentWsDelivery, type DocSubscription } from '../../services/doc-subs-store.js';
 import { wasPendingReviewNotified, markPendingReviewNotified } from '../../services/under-review-notify-store.js';
+import { clearScopeProblemNotification, notifyScopeProblemOnce } from '../../services/scope-notification-store.js';
 import { getDocComment, isBotAuthoredReply, hasBotSentinel, commentTriggerAllowed, BOT_REPLY_SENTINEL, addCommentReactionChecked } from './doc-comment.js';
 import {
   BOTMUX_REQUIRED_SCOPES,
@@ -40,6 +42,7 @@ import {
   VC_MEETING_REALTIME_VOICE_SCOPES,
   buildEventSubDeepLink,
   buildScopeDeepLink,
+  isScopeGranted,
 } from '../../setup/verify-permissions.js';
 import { automateOpenPlatformSetup, probeVcMeetingEventSubscription, readDefaultScopeManifest, filterScopeManifest, inspectUnderReviewConfigHints } from '../../setup/open-platform-automation.js';
 import { type Brand, larkHosts, normalizeBrand } from './lark-hosts.js';
@@ -225,7 +228,6 @@ export async function probeBotOpenId(larkAppId: string): Promise<void> {
 // 推荐路径——拿不到 app info 时（飞书返回 99991672）我们就主动私信
 // admin 提示开通 self_manage，下次重启就能自检。
 
-const REQUIRED_BOT_AT_SCOPE = 'im:message.group_at_msg.include_bot:readonly';
 const SELF_MANAGE_SCOPE = 'application:application:self_manage';
 
 function getAdminOpenId(bot: BotState): string | undefined {
@@ -238,7 +240,7 @@ function getAdminOpenId(bot: BotState): string | undefined {
  * 为什么要返回值：多数调用点是 best-effort、不关心成败（所以这里吞掉异常而不是抛，
  * 避免一次 DM 失败中断整条自检流程）。但「按待审版本节流」那处必须知道成败 ——
  * 先记「已通知」再发的话，一次网络失败就把那个版本永久节流掉，人再也收不到提醒，
- * 且是零信号的静默丢失。所以由这里如实回报，让**只有关心的那一处**去判断。
+ * 且是零信号的静默丢失。因此所有持久去重调用方都须按此返回值记账。
  */
 async function dmAdmin(larkAppId: string, adminOpenId: string, content: string, contextTag: string): Promise<boolean> {
   try {
@@ -506,10 +508,9 @@ export async function checkRequiredScopes(larkAppId: string): Promise<void> {
         if (fixed.kind !== 'failed') return;
       }
       const selfManageAuthUrl = buildScopeDeepLink(bot.config.larkAppId, SELF_MANAGE_SCOPE, brand);
-      const targetAuthUrl = buildScopeDeepLink(bot.config.larkAppId, REQUIRED_BOT_AT_SCOPE, brand);
       logger.warn(
-        `[${larkAppId}] scope 自检 API 被拒（99991672）：应用缺少 ${SELF_MANAGE_SCOPE}（免审批）。` +
-        `开通后下次 daemon 重启即可自动核验跨 bot @ 必需权限 ${REQUIRED_BOT_AT_SCOPE}。申请链接：${selfManageAuthUrl}`,
+        `[${larkAppId}] scope 自检 API 被拒（99991672）：无法读取应用权限清单，不能据此判断消息或群功能权限是否缺失。` +
+        `自检权限 ${SELF_MANAGE_SCOPE}：${selfManageAuthUrl}；修复原应用：botmux setup configure ${bot.config.larkAppId}`,
       );
       const adminOpenId = getAdminOpenId(bot);
       if (!adminOpenId) {
@@ -517,13 +518,13 @@ export async function checkRequiredScopes(larkAppId: string): Promise<void> {
         return;
       }
       const dm =
-        `⚠️ botmux 想自动核验机器人 "${bot.botName ?? larkAppId}" 是否开通了跨 bot @ 必需权限，但发现应用自身缺少一个**免审批**的辅助权限，因此查不到 scope 列表。\n\n` +
-        `**操作步骤（点链接 → 申请开通 → 重启 daemon）**：\n` +
-        `1. 开通 ${SELF_MANAGE_SCOPE}（免审批，自动通过）：\n   ${selfManageAuthUrl}\n\n` +
-        `2. 顺便确认/开通真正的目标权限 ${REQUIRED_BOT_AT_SCOPE}（"获取群组中其他机器人和用户@当前机器人的消息"，免审批，自动通过）：\n   ${targetAuthUrl}\n\n` +
-        `3. \`botmux restart\`，启动后 botmux 会自动复核，结果会再次发到这里。\n\n` +
-        `**为什么需要**：botmux 多机器人协作（A 机器人 @ B 机器人）依赖目标权限把跨 bot 事件推送过来；不开通则跨 bot @ 完全失效。`;
-      await dmAdmin(larkAppId, adminOpenId, dm, 'self_manage scope (auto-approved) missing');
+        `⚠️ 机器人 "${bot.botName ?? larkAppId}" 的启动权限自检无法读取应用权限清单（99991672）。\n\n` +
+        `受影响功能：自动核验权限。本次查询失败不能证明消息或群功能权限缺失。\n\n` +
+        `自检所需辅助权限：\`${SELF_MANAGE_SCOPE}\`\n${selfManageAuthUrl}\n\n` +
+        `修复当前应用：\`botmux setup configure ${bot.config.larkAppId}\`。也可在上面的权限页核对并开通自检权限。`;
+      await notifyScopeProblemOnce(config.session.dataDir, {
+        larkAppId, adminOpenId, problem: 'self-manage', missingScopes: [SELF_MANAGE_SCOPE],
+      }, () => dmAdmin(larkAppId, adminOpenId, dm, 'self_manage scope check unavailable'));
       return;
     }
 
@@ -531,6 +532,7 @@ export async function checkRequiredScopes(larkAppId: string): Promise<void> {
       logger.debug(`[${larkAppId}] scope check skipped: app info failed (code=${infoData.code} msg=${infoData.msg ?? ''})`);
       return;
     }
+    clearScopeProblemNotification(config.session.dataDir, larkAppId, 'self-manage');
     // Lark 文档示例把 scopes 放在 data.app.scopes；为防响应结构变化，
     // 同时兜底 data.scopes / data.application.scopes，取到的第一个非空数组为准。
     const scopesRaw: any[] =
@@ -651,14 +653,13 @@ export async function checkRequiredScopes(larkAppId: string): Promise<void> {
       logger.debug(`[${larkAppId}] vc-meeting readiness check errored: ${err?.message ?? err}`);
     }
 
-    // Diff against the canonical list. Critical-missing is the main signal;
-    // non-critical is mentioned only when something critical is also missing,
-    // so deployments don't get nagged about purely optional scopes like
-    // `application:application:self_manage`.
-    const missingCritical = BOTMUX_REQUIRED_SCOPES.filter(s => s.critical && !grantedScopes.has(s.name));
-    const missingOptional = BOTMUX_REQUIRED_SCOPES.filter(s => !s.critical && !grantedScopes.has(s.name));
+    // Critical gaps drive the startup warning. Keep optional gaps for the
+    // existing feature auto-fix flow, without recommending them in the DM.
+    const missingCritical = BOTMUX_REQUIRED_SCOPES.filter(s => s.critical && !isScopeGranted(s.name, grantedScopes));
+    const missingOptional = BOTMUX_REQUIRED_SCOPES.filter(s => !s.critical && !isScopeGranted(s.name, grantedScopes));
 
     if (missingCritical.length === 0) {
+      clearScopeProblemNotification(config.session.dataDir, larkAppId, 'missing-critical');
       // All critical scopes present. If an opt-in feature added a non-critical
       // scope that isn't granted yet, top it up SILENTLY — but only when a cached
       // Feishu web session already exists (disableQrLogin makes a missing session
@@ -746,7 +747,7 @@ export async function checkRequiredScopes(larkAppId: string): Promise<void> {
     const summaryLine = missingCritical.map(s => `${s.name} (${s.desc})`).join('、');
     logger.error(
       `[${larkAppId}] 缺少 ${missingCritical.length} 项必需权限：${summaryLine}。` +
-      `botmux 核心功能（消息收发、附件下载、用户名解析等）会受影响。请到飞书开放平台 → 应用 → 权限管理里申请，开通后 \`botmux restart\`。`,
+      `受影响功能：${missingCritical.map(s => s.desc).join('、')}。修复原应用：botmux setup configure ${bot.config.larkAppId}`,
     );
     const adminOpenId = getAdminOpenId(bot);
     if (!adminOpenId) {
@@ -756,15 +757,14 @@ export async function checkRequiredScopes(larkAppId: string): Promise<void> {
     const criticalLines = missingCritical.map((s, i) =>
       `${i + 1}. **${s.desc}** (\`${s.name}\`)\n   ${buildScopeDeepLink(bot.config.larkAppId, s.name, brand)}`,
     ).join('\n\n');
-    const optionalBlock = missingOptional.length > 0
-      ? `\n\n**可选权限（建议一并开通）**：\n${missingOptional.map(s => `- ${s.desc} (\`${s.name}\`): ${buildScopeDeepLink(bot.config.larkAppId, s.name, brand)}`).join('\n')}`
-      : '';
     const dm =
       `⚠️ botmux 启动检查发现机器人 "${bot.botName ?? larkAppId}" 缺少 ${missingCritical.length} 项必需权限\n\n` +
-      `**操作步骤（点链接 → 申请开通 → 重启 daemon）**：\n\n` +
+      `**受影响功能及对应权限**：\n\n` +
       `${criticalLines}\n\n` +
-      `开通完成后执行 \`botmux restart\`，botmux 会再次自检并把结果发到这里。${optionalBlock}`;
-    await dmAdmin(larkAppId, adminOpenId, dm, `missing scopes: ${missingCritical.map(s => s.name).join(',')}`);
+      `修复当前应用：\`botmux setup configure ${bot.config.larkAppId}\`。也可按上面的深链核对缺失项。`;
+    await notifyScopeProblemOnce(config.session.dataDir, {
+      larkAppId, adminOpenId, problem: 'missing-critical', missingScopes: missingCritical.map(s => s.name),
+    }, () => dmAdmin(larkAppId, adminOpenId, dm, `missing scopes: ${missingCritical.map(s => s.name).join(',')}`));
   } catch (err: any) {
     logger.debug(`[${larkAppId}] scope check errored: ${err?.message ?? err}`);
   }
@@ -4768,6 +4768,7 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
     'im.message.reaction.created_v1': () => {},
     'im.message.reaction.deleted_v1': () => {},
     'im.message.receive_v1': (data: any) => {
+      if (isExternalTaskDm(larkAppId, data?.message)) return;
       // Dedupe by message_id (stable across re-pushes / event_id re-mints /
       // daemon restarts), persisted so the 6h re-push tier or a restart can't
       // replay an already-handled message. Fall back to the in-memory event-id

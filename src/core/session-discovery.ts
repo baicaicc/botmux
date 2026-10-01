@@ -1,3 +1,5 @@
+import {claudeDataDirForPid} from '../services/claude-data-dir.js';
+import {codebuddySession} from '../services/codebuddy-transcript.js';
 /**
  * Session Discovery — scans tmux panes for running CLI processes that can be adopted.
  *
@@ -41,6 +43,7 @@ export interface AdoptableSession {
 // ─── CLI process name → CliId mapping ────────────────────────────────────────
 
 const CLI_COMM_MAP: Record<string, CliId> = {
+  codebuddy: 'codebuddy',
   claude: 'claude-code',
   // Seed / Relay are Claude Code forks (Relay is Seed's new release
   // name). Both rebrand process.title to their product name, so a running
@@ -657,7 +660,7 @@ export function scheduleWrapperRealCliPid(launcherPid: number, deps: WrapperReal
  */
 export function readClaudeSessionMeta(pid: number): { sessionId?: string; cwd?: string; startedAt?: number } | undefined {
   try {
-    const metaPath = join(homedir(), '.claude', 'sessions', `${pid}.json`);
+    const metaPath = join(claudeDataDirForPid(pid), 'sessions', `${pid}.json`);
     const raw = readFileSync(metaPath, 'utf-8');
     const data = JSON.parse(raw) as Record<string, unknown>;
     return {
@@ -767,7 +770,7 @@ function herdrPaneCliProcess(
   filterCliId?: CliId,
   expectedPid?: number,
   filterExecutable?: string,
-): { pid: number; cliId: CliId; cwd?: string } | undefined {
+): { pid: number; cliId: CliId; cwd?: string; remoteSessionId?: string } | undefined {
   const info = raw?.result?.process_info;
   const processes = Array.isArray(info?.foreground_processes) ? info.foreground_processes : [];
   for (const proc of processes) {
@@ -802,7 +805,16 @@ function herdrPaneCliProcess(
       if (comm) cliId = cliIdFromCommArgv(comm, effectiveArgv, filterCliId, filterExecutable);
     }
     if (cliId && pidMatches) {
-      return { pid, cliId, cwd: typeof proc?.cwd === 'string' ? proc.cwd : undefined };
+      let remoteSessionId: string | undefined;
+      if (cliId === 'codex') {
+        const remoteAt=effectiveArgv.indexOf('--remote'),resumeAt=effectiveArgv.indexOf('resume');
+        const sid=effectiveArgv[resumeAt+1];
+        try {
+          const endpoint=new URL(effectiveArgv[remoteAt+1]);
+          if(remoteAt>0 && resumeAt>0 && /^ws:$/.test(endpoint.protocol) && ['127.0.0.1','localhost','[::1]'].includes(endpoint.hostname) && !endpoint.username && !endpoint.password && !endpoint.search && /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(sid))remoteSessionId=sid;
+        } catch {}
+      }
+      return { pid, cliId, cwd: typeof proc?.cwd === 'string' ? proc.cwd : undefined, remoteSessionId };
     }
   }
   return undefined;
@@ -859,7 +871,7 @@ function discoverHerdrAdoptableSessions(filterCliId?: CliId, filterExecutable?: 
       let sessionId = herdrAgentSessionId(agent);
       if (!sessionId && cliPid) {
         if (cliId === 'traex') sessionId = findTraexRolloutByPid(cliPid)?.cliSessionId;
-        else if (cliId === 'codex') sessionId = findCodexRolloutByPid(cliPid)?.cliSessionId;
+        else if (cliId === 'codex') sessionId = process?.remoteSessionId ?? findCodexRolloutByPid(cliPid)?.cliSessionId;
         else if (cliId === 'coco') sessionId = findCocoSessionByPid(cliPid)?.sessionId;
       }
       const claudeMeta = cliId === 'claude-code'
@@ -899,8 +911,9 @@ function discoverHerdrAdoptableSessions(filterCliId?: CliId, filterExecutable?: 
         ?? (typeof pane?.cwd === 'string' ? pane.cwd : undefined);
       if (!cwd) continue;
       let sessionId: string | undefined;
-      if (process.cliId === 'traex') sessionId = findTraexRolloutByPid(process.pid)?.cliSessionId;
-      else if (process.cliId === 'codex') sessionId = findCodexRolloutByPid(process.pid)?.cliSessionId;
+      if (process.cliId === 'codebuddy') sessionId=codebuddySession(process.pid)?.sessionId;
+      else if (process.cliId === 'traex') sessionId = findTraexRolloutByPid(process.pid)?.cliSessionId;
+      else if (process.cliId === 'codex') sessionId = process.remoteSessionId ?? findCodexRolloutByPid(process.pid)?.cliSessionId;
       else if (process.cliId === 'coco') sessionId = findCocoSessionByPid(process.pid)?.sessionId;
       const claudeMeta = process.cliId === 'claude-code' ? readClaudeSessionMeta(process.pid) : undefined;
       results.push({

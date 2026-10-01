@@ -1,4 +1,8 @@
 #!/usr/bin/env node
+import {claudeDataDirForPid} from './services/claude-data-dir.js';
+import {codebuddySession,drainCodeBuddyTranscript} from './services/codebuddy-transcript.js';
+import {KimiNativeFailureObserver} from './services/kimi-native-failure.js';
+import {codebuddyActionPrompt} from './services/codebuddy-action-prompt.js';
 /**
  * Worker process: manages a single CLI PTY session + web terminal.
  * Forked by the daemon, communicates via Node.js IPC.
@@ -117,6 +121,7 @@ import { remoteWorkerShutdownInputBlocker } from './core/remote-worker-shutdown-
 import { ReadyGate, shouldArmReadyGate } from './utils/ready-gate.js';
 import { shouldRunStartupCommandsOnSpawn, shouldDeferInitialPromptForStartup } from './core/startup-commands.js';
 import { sanitizePerBotEnv } from './core/per-bot-env.js';
+import { resolveKllLaunch, validateKllLaunch, validateKllExtraArgs } from './services/kll-launch.js';
 import { normalizeExistingAppServerEndpoint } from './core/existing-app-server.js';
 import { resolveChildBotsConfig } from './core/config-dir.js';
 import {
@@ -249,6 +254,7 @@ import { createServer as createNetServer, type Server as NetServer, type Socket 
 import { WebSocketServer, WebSocket } from 'ws';
 import { listenWebTerminalWithFallback } from './utils/web-terminal-listen.js';
 import { HerdrWebTerminalBinding } from './utils/herdr-web-terminal-binding.js';
+import { connectHerdrWebStream, HERDR_WEB_CONTROL_FAILED } from './utils/herdr-web-stream.js';
 import { TERMINAL_FAVICON_DATA_URI } from './utils/terminal-favicon.js';
 import type {
   CodexAppDispatchLedgerEntry,
@@ -1609,6 +1615,11 @@ let tmuxRestartTimer: NodeJS.Timeout | null = null;
  *  lifecycle so a 4× crash loop does not spam the Lark thread with 4 copies
  *  of the same warning. */
 let resumeFallbackNotified = false;
+/** True once the claude-family transcript bridge has SEEN the CLI session's
+ *  JSONL file exist (at attach, or lazily on first appearance). A first-turn
+ *  launch that dies before the CLI writes anything leaves no user-visible
+ *  history; its resume-fallback is a recovery detail, not context loss. */
+let cliTranscriptEverExisted = false;
 /** Skill catalog to attach to the first user turn after a prompt-less CLI restart. */
 let deferredPluginSkillCatalog: string | null = null;
 
@@ -2101,6 +2112,7 @@ let isZellijMode = false;
 let httpServer: ReturnType<typeof createHttpServer> | null = null;
 let wss: WebSocketServer | null = null;
 const wsClients = new Set<WebSocket>();
+const sharedHerdrWsClients = new Set<WebSocket>();
 const authedClients = new WeakSet<WebSocket>();
 /** Per-WS-client tmux/zellij attach PTYs. */
 const clientPtys = new Map<WebSocket, pty.IPty>();
@@ -2254,7 +2266,11 @@ function resolveTerminalAccessForReq(req: IncomingMessage, url: URL): WorkerTerm
   return {
     hasRead: true,
     hasWrite: grant.claims.scope === 'write',
-    platformReadonly: grant.claims.scope === 'read',
+    // Device-paired readers already approved their identity in Lark. Their
+    // view link stays read-only and uses the normal read-only banner; the
+    // platform owner-login banner applies only to central dashboard grants.
+    // This display hint is considered only after the signed grant verified.
+    platformReadonly: grant.claims.scope === 'read' && req.headers['x-botmux-terminal-device'] !== '1',
     auditUser: grant.claims.userId,
     controlExpiresAt: grant.claims.expiresAt,
   };
@@ -2282,6 +2298,7 @@ function ensureZellijAttachConfig(): string {
 
 let sessionId = '';
 let lastInitConfig: Extract<DaemonToWorker, { type: 'init' }> | null = null;
+let kllSelectedProfileId: string | undefined;
 
 /** 本会话最终回复的投递方式。daemon 在 init 上冻结（core/reply-delivery.ts），
  *  抑制闸据此判断 final 是「兜底」还是「投递通道」。读不到一律 'send'——
@@ -2296,7 +2313,7 @@ let closeRequested = false;
 let capturedSpawnCommand: string | null = null;
 let deferredTopicOutputTail = '';
 const reportedDeferredTopicRoots = new Set<string>();
-const CLI_DISPLAY_NAMES: Record<string, string> = { 'claude-code': 'Claude', seed: 'Seed', relay: 'Relay', aiden: 'Aiden', coco: 'CoCo', codex: 'Codex', 'codex-app': 'Codex App', cursor: 'Cursor', gemini: 'Gemini', genius: 'Genius', opencode: 'OpenCode', opencode2: 'OpenCode 2', antigravity: 'Antigravity', mtr: 'MTR', hermes: 'Hermes', mira: 'Mira', mir: 'Mir CLI', traex: 'TRAE', pi: 'Pi', copilot: 'Copilot', 'oh-my-pi': 'Oh My Pi', ebsd: 'ebsd', kimi: 'Kimi', grok: 'Grok Build', 'kiro-cli': 'Kiro', riff: 'Riff', reasonix: 'Reasonix', dsh: 'DeepSeek Harness', 'dsh-tui': 'DeepSeek Harness TUI', mojo: 'Mojo', minimax: 'MiniMax' };
+const CLI_DISPLAY_NAMES: Record<string, string> = { codebuddy:'CodeBuddy Code', 'claude-code': 'Claude', seed: 'Seed', relay: 'Relay', aiden: 'Aiden', coco: 'CoCo', codex: 'Codex', 'codex-app': 'Codex App', cursor: 'Cursor', gemini: 'Gemini', genius: 'Genius', opencode: 'OpenCode', opencode2: 'OpenCode 2', antigravity: 'Antigravity', mtr: 'MTR', hermes: 'Hermes', mira: 'Mira', mir: 'Mir CLI', traex: 'TRAE', pi: 'Pi', copilot: 'Copilot', 'oh-my-pi': 'Oh My Pi', ebsd: 'ebsd', kimi: 'Kimi', grok: 'Grok Build', 'kiro-cli': 'Kiro', riff: 'Riff', reasonix: 'Reasonix', dsh: 'DeepSeek Harness', 'dsh-tui': 'DeepSeek Harness TUI', mojo: 'Mojo', minimax: 'MiniMax' };
 function cliName(): string {
   return (lastInitConfig?.cliRuntime?.source === 'configured'
     ? (lastInitConfig.cliRuntime.displayName?.trim() || lastInitConfig.cliRuntime.id)
@@ -2350,7 +2367,7 @@ function codexUpgradeBlocked(): string | undefined {
       || hasStructuredLifecycleBlock()) return 'waiting for the current turn and input queues';
   // Web terminal writes can bypass normal input queues. Never replace a CLI
   // while a terminal client is attached, including during a pending handshake.
-  if (wsClients.size || clientPtys.size) return 'a Web Terminal is attached';
+  if (wsClients.size || sharedHerdrWsClients.size || clientPtys.size) return 'a Web Terminal is attached';
   return codexUpgradeInspectionBlock;
 }
 
@@ -3148,6 +3165,51 @@ const inflightInputs = new InflightInputTracker();
  *  start work before their history/transcript submit marker is observable. */
 let lastPtyActivityAtMs = 0;
 let currentBotmuxTurnId: string | undefined;
+const kimiNativeFailureObserver = new KimiNativeFailureObserver();
+let kimiFailureGeneration: {backend: HerdrBackend; generation: number} | undefined;
+
+function markKimiNativeTurn(content: string, turnId?: string, dispatchAttempt?: number): void {
+  kimiNativeFailureObserver.clear();
+  kimiFailureGeneration = undefined;
+  if (lastInitConfig?.cliId !== 'kimi' || !(backend instanceof HerdrBackend) || !turnId) return;
+  const source = backend.getKimiNativeOwner();
+  if (!source) {
+    log(`Kimi failure observer not armed: owner unresolved at write time (turn=${shortCorrelationId(turnId)})`);
+    return;
+  }
+  kimiNativeFailureObserver.mark(source, {content, turnId, dispatchAttempt});
+  if (kimiNativeFailureObserver.active) kimiFailureGeneration = {backend, generation: cliSpawnGeneration};
+  else log(`Kimi failure observer not armed: mark rejected the pinned owner (turn=${shortCorrelationId(turnId)})`);
+}
+
+function checkKimiNativeFailure(): void {
+  if (!kimiNativeFailureObserver.active) return;
+  const fence = kimiFailureGeneration;
+  if (!fence || backend !== fence.backend || cliSpawnGeneration !== fence.generation || cliRestartInProgress) {
+    kimiNativeFailureObserver.clear();
+    return;
+  }
+  const source = fence.backend.getKimiNativeOwner();
+  const failure = kimiNativeFailureObserver.poll(source);
+  if (!failure || !source) {
+    if (!kimiNativeFailureObserver.active) {
+      log(`Kimi failure mark dropped without delivery (wire mismatch or storage fence, turn=${shortCorrelationId(currentBotmuxTurnId ?? '')})`);
+    }
+    return;
+  }
+  const fresh = fence.backend.getKimiNativeOwner();
+  if (backend !== fence.backend || cliSpawnGeneration !== fence.generation
+    || failure.turnId !== currentBotmuxTurnId || failure.dispatchAttempt !== currentBotmuxDispatchAttempt) {
+    kimiNativeFailureObserver.clear();
+    return;
+  }
+  if (!kimiNativeFailureObserver.acknowledge(failure, fresh)) return;
+  send({type: 'final_output', content: failedBridgeFailureText(failure.errorCode, failure.summary),
+    lastUuid: `kimi-${failure.nativeSessionId}-${failure.turnId}`, turnId: failure.turnId,
+    ...(failure.dispatchAttempt !== undefined ? {dispatchAttempt: failure.dispatchAttempt} : {}), turnFailed: true});
+  emitTurnTerminal(failure.turnId, 'failed', failure.errorCode, failure.dispatchAttempt,
+    undefined, failure.retryable, failure.completedAtMs);
+}
 let currentBotmuxDispatchAttempt: number | undefined;
 let currentVcMeetingImTurnOrigin: VcMeetingImTurnOrigin | undefined;
 let durableTurnInFlight = false;
@@ -5340,6 +5402,11 @@ function scheduleHerdrAdoptBridgeQuietEmit(): void {
 
 function bridgeAbsorbBaseline(): void {
   if (!bridgeJsonlPath) return;
+  // The transcript file exists (or just appeared): this CLI session HAS
+  // user-visible history. Recorded here so the resume-fallback notice can
+  // distinguish real context loss from a first-turn launch that died before
+  // the CLI ever wrote its session file.
+  cliTranscriptEverExisted = true;
   if (!lastInitConfig?.adoptMode) {
     // Restart recovery: if the previous generation left pending Lark turns in
     // the durable journal (worker/daemon died mid-turn), re-mark them and
@@ -6741,6 +6808,7 @@ function structuredBridgeIngestPath(
   offset: number,
   opts: { flushOmpTrailingFinal?: boolean } = {},
 ) {
+  if (lastInitConfig?.cliId==='codebuddy') return drainCodeBuddyTranscript(path,offset);
   if (structuredBridgeIsCodex()) return drainCodexRollout(path, offset);
   // adoptMode gates the drainer's bare-sentinel synthesis: adopt posts
   // transcript text verbatim, so a synthesised token would leak into Lark.
@@ -8135,13 +8203,11 @@ function emitReadyCodexTurns(): void {
     : undefined;
   for (let i = 0; i < ready.length; i++) {
     const turn = ready[i];
-    // A shared App Server session still owns the BotMux remote TUI, so its
-    // Lark-originated turns retain normal send-marker deduplication. Only a
-    // turn synthesized from Codex App input is external/local: that side has
-    // no pending Lark fingerprint and must be forwarded like terminal
-    // `/adopt`, including both the App prompt and its final reply.
+    // Shared App Server and managed CodeBuddy sessions also accept direct
+    // native input. Forward those local turns like `/adopt`, retaining normal
+    // send-marker deduplication for their Lark-originated turns.
     const adoptMode = terminalAdoptMode
-      || (sharedAppServerBridge && turn.isLocal === true);
+      || ((sharedAppServerBridge || lastInitConfig?.cliId === 'codebuddy') && turn.isLocal === true);
     const sourceHermesSessionId = structuredBridgeIsHermes() ? turn.sourceSessionId : undefined;
     const nextBoundaryMs = (i + 1 < ready.length ? ready[i + 1].markTimeMs : nextPendingMarkTimeMs);
     const gateInput = {
@@ -8892,6 +8958,13 @@ async function writeAdoptMessage(
         codexBridgeQueue.finishSubmitVerification(adoptStructuredBridgeTurnId, undefined, dispatchAttempt);
       }
       dropFailedBridgeMark(adoptStructuredBridgeTurnId, dispatchAttempt);
+      if (blockedBeforeWrite && adoptBackend instanceof HerdrBackend) {
+        send({type:'screen_update',content:renderer?.snapshot().content ?? '',status:'stalled',turnId,dispatchAttempt});
+        if (turnId) emitTurnTerminal(turnId, 'failed', 'herdr_input_not_sent', dispatchAttempt, undefined, false);
+        send({type:'user_notify',turnId,dispatchAttempt,message:err.message});
+        redriveRejectedStructuredReady();
+        return 'completed';
+      }
       if (turnId && dispatchAttempt !== undefined && blockedBeforeWrite) {
         // The ZMX recovery hold refused the write, so the input definitely did
         // NOT execute — a genuine retryable failure, not an ambiguous one.
@@ -10672,8 +10745,13 @@ async function runAmbiguousSubmissionTransaction<T>(
   beforeWrite?: () => void | Promise<void>,
 ): Promise<{ result: T; recoveryFailureReason?: string }> {
   if (!target.captureAmbiguousSubmissionFence) {
-    await beforeWrite?.();
-    return { result: await write() };
+    let release: (() => Promise<void>) | undefined;
+    if(target instanceof HerdrBackend) {
+      try {release=await target.acquireSharedInput();}
+      catch(error) {throw new SubmissionWriteError((error as Error).message,(error as Error).message,false);}
+    }
+    try {await beforeWrite?.();return { result: await write() };}
+    finally{try {await release?.();}catch(error){throw new SubmissionWriteError((error as Error).message,(error as Error).message,true);}}
   }
 
   const previous = ambiguousSubmissionWriteTail;
@@ -11223,6 +11301,7 @@ function markPromptReady(): void {
   // Screen probes and timeout fallbacks must honor the same startup evidence
   // as quiescence; a skeleton composer is not a ready CLI.
   if (idleDetector?.isStartupPending()) return;
+  checkKimiNativeFailure();
   if (bareShellLaunchBlocked) {
     log('Ignoring non-PTY prompt-ready while bare-shell launch block is active');
     return;
@@ -12285,6 +12364,7 @@ async function flushPending(): Promise<void> {
         // real completedAtMs (the failure instant), just no durationMs. Arming
         // here also keeps queueing time out of the span.
         markTurnExecutionStart(item.turnId, item.dispatchAttempt);
+        markKimiNativeTurn(msg, item.turnId, item.dispatchAttempt);
         if (lastInitConfig?.cliId === 'codex-app') {
           log(
             `Writing Codex App input to PTY (flush): `
@@ -12609,6 +12689,18 @@ async function flushPending(): Promise<void> {
           );
           break;
         }
+        if (blockedBeforeWrite && submissionBackend instanceof HerdrBackend) {
+          // A shared terminal refusal proves no bytes were written. Match the
+          // adopt path: retain the IM message for explicit retry, but do not
+          // install ZMX's sticky recovery hold or replay it automatically.
+          dropFailedBridgeMark(bridgeTurnId, item.dispatchAttempt);
+          inflightInputs.retire(item);
+          send({type:'screen_update',content:renderer?.snapshot().content ?? '',status:'stalled',turnId:item.turnId,dispatchAttempt:item.dispatchAttempt});
+          if (item.turnId) emitTurnTerminal(item.turnId, 'failed', 'herdr_input_not_sent', item.dispatchAttempt, undefined, false);
+          send({type:'user_notify',turnId:item.turnId,dispatchAttempt:item.dispatchAttempt,message:`${err.message} 处理原终端提示后，可发送 /retry 重试本条消息。`});
+          redriveRejectedStructuredReady();
+          break;
+        }
         // Legacy/non-control adapters keep their existing submit-failure path.
         // A durable receiver attempt transfers replay ownership to the
         // receipt/lease reconciler on the ambiguous terminal below, so remove
@@ -12656,7 +12748,12 @@ async function flushPending(): Promise<void> {
           };
           log('Held definitely-unwritten input until ZMX recovery restart');
         } else {
-          requeueUnsubmittedQueuedActivation(item);
+          // Kimi's atomic input can have reached the editor before a write
+          // fails. Replaying an opening could duplicate that partial input.
+          // Keep the known-unwritten path eligible for its existing retry.
+          if (lastInitConfig?.cliId !== 'kimi' || !normalWritePrepared) {
+            requeueUnsubmittedQueuedActivation(item);
+          }
           if (recoveryFailureReason) inflightInputs.retire(item);
         }
         if (dispatchStillPending && durableWrite && item.turnId && !recoveryFailureReason) {
@@ -13003,6 +13100,8 @@ function startScreenUpdates(): void {
   let lastSentStatus: string | undefined;
   let lastTextSnapshotHash = '';
   let lastContent = '';
+  let lastCodebuddyActionPrompt = '';
+  let lastCodebuddyActionTurnId: string | undefined;
   // PTY-activity watermark of the last tick that actually captured. The screen
   // normally reaches us only through onPtyData (it updates lastPtyActivityAtMs
   // and feeds the renderer in the same place), so when this hasn't advanced the
@@ -13012,6 +13111,7 @@ function startScreenUpdates(): void {
   // watermark — there we must capture every tick (see shouldCaptureScreen).
   let lastSnapshotPtyActivity = -1;
   screenUpdateTimer = setInterval(() => {
+    checkKimiNativeFailure();
     if (awaitingFirstPrompt) {
       // First-turn 「工作中」 publisher. The async sampler below is fully gated
       // until the first turn ends (markPromptReady flips awaitingFirstPrompt) or
@@ -13104,6 +13204,24 @@ function startScreenUpdates(): void {
       if (!snapshot) return;
 
       const usageAware = usageLimitTracker.classify(snapshot.content, status);
+      // CodeBuddy's own confirmation UI is otherwise hidden behind Lark's
+      // "show output" toggle. Notify the same turn once per visible picker;
+      // only the bounded question/options leave the terminal, never tool args.
+      if (lastInitConfig?.cliId === 'codebuddy' && currentBotmuxTurnId && status === 'working') {
+        // The filtered stream snapshot can drop a selected "❯ 1. Yes" row as
+        // input echo; the unfiltered viewport retains CodeBuddy's choices.
+        const prompt = codebuddyActionPrompt(lastAnalyzerSnapshot || renderer?.rawSnapshot() || snapshot.content);
+        if (lastCodebuddyActionTurnId !== currentBotmuxTurnId) {
+          lastCodebuddyActionTurnId = currentBotmuxTurnId;
+          lastCodebuddyActionPrompt = '';
+        }
+        if (prompt && prompt !== lastCodebuddyActionPrompt) {
+          lastCodebuddyActionPrompt = prompt;
+          send({type: 'user_notify', message: prompt, turnId: currentBotmuxTurnId, dispatchAttempt: currentBotmuxDispatchAttempt});
+        } else if (!prompt) {
+          lastCodebuddyActionPrompt = '';
+        }
+      }
       if (snapshot.changed || usageAware.status !== lastSentStatus) {
         lastSentStatus = usageAware.status;
         send({
@@ -13119,6 +13237,8 @@ function startScreenUpdates(): void {
 }
 
 function stopScreenUpdates(): void {
+  kimiNativeFailureObserver.clear();
+  kimiFailureGeneration = undefined;
   if (screenUpdateTimer) { clearInterval(screenUpdateTimer); screenUpdateTimer = null; }
   if (renderer) { renderer.dispose(); renderer = null; }
   lastAnalyzerSnapshot = '';
@@ -13129,6 +13249,7 @@ function stopScreenUpdates(): void {
 function setupAdoptTranscriptBridges(cfg: Extract<DaemonToWorker, { type: 'init' }>): void {
   if (cfg.bridgeJsonlPath) {
     startBridgeWatcher(cfg.bridgeJsonlPath, {
+      dataDir:claudeDataDirForPid(cfg.adoptCliPid),
       cliPid: cfg.adoptCliPid,
       cliCwd: cfg.adoptCwd,
     });
@@ -13241,7 +13362,7 @@ function setupAdoptTranscriptBridges(cfg: Extract<DaemonToWorker, { type: 'init'
       codexAdoptPendingPid = cfg.adoptCliPid;
       codexBridgeStartTimer();
     }
-  } else if (cfg.cliId === 'pi' || cfg.cliId === 'grok') {
+  } else if (cfg.cliId === 'pi' || cfg.cliId === 'grok' || cfg.cliId === 'codebuddy') {
     // File-backed bridges share the same adopt attach skeleton (sid → pid →
     // split-live | pending). Path lookup is resolveFileBridgePath; pi is
     // intentionally folded here with grok so the two stay in lockstep.
@@ -13472,6 +13593,7 @@ async function spawnCli(
   cfg: Extract<DaemonToWorker, { type: 'init' }>,
   opts: { pluginGenerationPrepared?: boolean } = {},
 ): Promise<void> {
+  validateKllLaunch(cfg);
   const spawnGeneration = ++cliSpawnGeneration;
   if (cfg.cliInstanceBinding && cfg.cliInstanceBinding.source !== 'legacy' && cfg.backendType === 'tmux') {
     TmuxBackend.assertInstanceIdentity(TmuxBackend.sessionName(cfg.sessionId), codexInstanceIdentity(cfg.cliInstanceBinding, cfg.cliRuntime));
@@ -13562,6 +13684,7 @@ async function spawnCli(
     const target = cfg.adoptHerdrTarget ?? cfg.adoptHerdrPaneId!;
     const herdrBe = new HerdrBackend(cfg.adoptHerdrSessionName, {
       externalTarget: {
+        guardInput:['claude-code','codebuddy','codex'].includes(cfg.cliId || ''),
         sessionName: cfg.adoptHerdrSessionName,
         target,
         paneId: cfg.adoptHerdrPaneId,
@@ -13701,6 +13824,9 @@ async function spawnCli(
     ? 'dsh-tui'
     : cfg.cliId as CliId;
   cliAdapter = createCliAdapterSync(effectiveCliId, cfg.cliPathOverride);
+  if (cfg.kll && cfg.cliId === 'codebuddy') {
+    validateKllLaunch({ ...cfg, cliPathOverride: realpathSync(cliAdapter.resolvedBin) });
+  }
   const cardActionCapabilities = pluginCardActionCapabilitiesEnv(cfg);
   // backendType trust-but-verify + HARD GATE (PTY 退役): an explicit per-bot
   // config (or BACKEND_TYPE env override) bypasses config.ts's default, so the
@@ -14733,6 +14859,21 @@ async function spawnCli(
     willReattachPersistent = false;
   }
 
+  // Select once before adapter settings/argv are built. Reattachment keeps the
+  // already-running CLI. Restarts reuse the selected model, never tier-fail over.
+  if (cfg.kll && !willReattachPersistent && effectiveBackendType === 'herdr') {
+    HerdrBackend.assertProtectedEnvironmentLaunch();
+  }
+  const kllLaunch = resolveKllLaunch(cfg, {
+    reattach: willReattachPersistent,
+    selectedProfileId: kllSelectedProfileId,
+  });
+  if (kllLaunch) {
+    kllSelectedProfileId = kllLaunch.profileId;
+    cfg = { ...cfg, model: kllLaunch.model, env: kllLaunch.env };
+    send({ type: 'kll_model_selected', profileId: kllLaunch.profileId, model: kllLaunch.model });
+  }
+
   // The worker establishes trust before any runner output can be parsed. A
   // fresh runner gets a new capability; a persistent reattach reloads the
   // capability created by that same runner generation.
@@ -14923,7 +15064,17 @@ async function spawnCli(
     }
     // Single human-visible warning. Spam guard: at most once per worker
     // lifecycle (a 4× crash loop otherwise duplicates the notice).
-    if (!resumeFallbackNotified) {
+    // claude-family only: when the transcript bridge never saw the session's
+    // JSONL file, the "history" that would not carry over never existed — the
+    // fallback is recovering a first-turn launch failure, and the pending
+    // first prompt is re-queued, not lost. Notifying the user about context
+    // they never had is a false alarm. Other CLIs (no JSONL bridge) keep the
+    // legacy always-notify behavior.
+    const suppressFallbackNotice =
+      (tier1ProbeFalse || tier2ForceFresh) && claudeDataDir !== undefined && !cliTranscriptEverExisted;
+    if (suppressFallbackNotice) {
+      log(`Resume fallback notice suppressed: no CLI transcript ever existed for this session (first-turn launch recovery); nothing user-visible was lost`);
+    } else if (!resumeFallbackNotified) {
       resumeFallbackNotified = true;
       send({
         type: 'user_notify',
@@ -15118,7 +15269,9 @@ async function spawnCli(
       if (sandboxRequested) {
         try { canonDir = realpathSync(settingsDir); } catch { /* 目录可能尚未创建，保留 lexical */ }
       }
-      perBotSettingsFilePath = join(canonDir, 'botmux-launch-settings.json');
+      perBotSettingsFilePath = join(canonDir, kllLaunch
+        ? `botmux-kll-${createHash('sha256').update(cfg.sessionId).digest('hex').slice(0, 16)}.json`
+        : 'botmux-launch-settings.json');
 
     }
   }
@@ -15182,6 +15335,9 @@ async function spawnCli(
     solo: cfg.solo,
     locale: cfg.locale,
     model: ttadkGateway ? undefined : cfg.model,
+    // KLL catalog model id when KLL owns this spawn's selection (dsh renders
+    // its per-session route overlay from it); other adapters ignore the field.
+    kllModelId: kllLaunch?.modelId,
     modelBackendVariant: cfg.modelBackendVariant,
     // dsh runner only; other adapters ignore the field.
     turnTimeoutMs: cfg.turnTimeoutMs,
@@ -15214,6 +15370,14 @@ async function spawnCli(
       ? nativeSubagentRuntimeHookCommand()
       : undefined,
   });
+  if (kllLaunch && cliAdapter.claudeDataDir) {
+    // A missing --settings would allow user/project provider settings to win.
+    // The ordinary adapter keeps its historical fallback; KLL must fail closed.
+    if (!perBotSettingsFilePath || !args.includes(perBotSettingsFilePath)) {
+      throw new Error('KLL requires protected Claude launch settings; the native CLI was not started');
+    }
+    chmodSync(perBotSettingsFilePath, 0o600);
+  }
   // Pi's deferred long-first-prompt command is implemented by a session-scoped
   // extension. Keep its launch args across owned process restarts while the
   // queued/in-flight command may still need replay.
@@ -15228,7 +15392,11 @@ async function spawnCli(
   if (cliAdapter.allowExtraArgs === false && (process.env.CLI_EXTRA_ARGS ?? '').trim()) {
     log(`Ignoring CLI_EXTRA_ARGS for fixed-contract adapter ${cliAdapter.id}`);
   }
-  if (extra) args.push(...extra.split(/\s+/).filter(Boolean));
+  if (extra) {
+    const extraArgs = extra.split(/\s+/).filter(Boolean);
+    if (kllLaunch) validateKllExtraArgs(cfg, extraArgs);
+    args.push(...extraArgs);
+  }
 
   // Claude Code 在 root/sudo 下会拒绝 --dangerously-skip-permissions 并立即 exit。
   // botmux 必须带这个 flag（话题里没法弹交互式审批），所以为 root 自动注入
@@ -15640,6 +15808,7 @@ async function spawnCli(
   // merged into childEnv) so the tmux/zellij backends inject it via the per-pane
   // `/usr/bin/env` prefix and never into the shared backing-server global env,
   // keeping it from leaking across bots. Re-sanitized here (crossed IPC).
+  for (const key of kllLaunch?.removeEnv ?? []) delete childEnv[key];
   const perBotInjectEnv = sanitizePerBotEnv(cfg.env);
   if (cliAdapter.id === 'ebsd') assertEbsdPerBotEnv(perBotInjectEnv);
   const perBotInjectKeys = Object.keys(perBotInjectEnv);
@@ -16872,6 +17041,13 @@ async function spawnCli(
   // can verify they were spawned inside a botmux session by walking the
   // process tree and looking for a matching pid file in this directory.
   const cliPid = backend.getChildPid?.();
+  if (cfg.cliId === 'codebuddy' && cliPid) {
+    const native = codebuddySession(cliPid);
+    if (!native || native.cwd !== cfg.workingDir || native.sessionId !== (effectiveCliSessionId ?? effectiveAdapterSessionId)) {
+      throw new Error('CodeBuddy 原生会话身份不符；未连接替代会话。');
+    }
+    persistCliSessionId(native.sessionId);
+  }
   if (cfg.existingAppServerEndpoint !== undefined) {
     // The local `codex --remote` client does not own the selected rollout fd;
     // writeInput must accept only the explicitly bound remote thread in the
@@ -17131,7 +17307,10 @@ async function spawnCli(
     } else {
       codexBridgeStartTimer();
     }
-  } else if (cfg.cliId === 'pi' || cfg.cliId === 'grok' || cfg.cliId === 'oh-my-pi' || cfg.cliId === 'ebsd') {
+  } else if (cfg.cliId === 'pi' || cfg.cliId === 'grok' || cfg.cliId === 'codebuddy' || cfg.cliId === 'oh-my-pi' || cfg.cliId === 'ebsd') {
+    // The managed CodeBuddy pane is also directly usable from Web / HERDR.
+    // Reuse adopted-session local-turn collection for those native inputs.
+    if (cfg.cliId === 'codebuddy') codexBridgeQueue.setLocalTurns(true, Date.now());
     // File-backed: pin path when known (pi session id / grok --session-id
     // UUID), else arm the poller. Grok collision-fallback (dir already
     // exists → no --session-id → grok mints id) is recovered via writeInput
@@ -18164,6 +18343,28 @@ function startWebServer(host: string, preferredPort?: number): Promise<number> {
         ws.close(4003, 'authorization expired');
         return;
       }
+      // A shared native Agent needs its own HERDR controller per browser.
+      // Keep these sockets out of snapshot broadcasts, especially while their
+      // native lease is pending: the first frame must be the write verdict.
+      if (backend instanceof HerdrBackend) {
+        const source = backend;
+        try {
+          const target = source.sharedWebTarget();
+          if (target) {
+            sharedHerdrWsClients.add(ws);
+            ws.once('close', () => sharedHerdrWsClients.delete(ws));
+            connectHerdrWebStream(ws, {...target, verify: () => {
+              if (backend !== source) throw new Error('原后端已变化。');
+              target.verify();
+            }}, {write: hasWrite, expiresAt: controlExpiresAt, audit: data => auditTerminalInput(auditUser, data)});
+            log(`Native HERDR web stream requested (write: ${hasWrite})`);
+            return;
+          }
+        } catch {
+          ws.close(HERDR_WEB_CONTROL_FAILED, '原 Agent 身份无法核验；请重新打开页面。');
+          return;
+        }
+      }
       wsClients.add(ws);
       const allowReadOnlyRemoteScroll = canHandleReadOnlyRemoteScroll();
       if (hasWrite) authedClients.add(ws);
@@ -18711,6 +18912,7 @@ ${loginUrl ? `<a id="login-banner" href="${loginUrl}" target="_top" rel="noopene
   </div>
 </form>
 <div id="status" class="err">connecting...</div>
+${process.env.BOTMUX_TERMINAL_DEVICE_PAIRING === '1' ? '<a id="device-authorization" href="./_device/settings" style="position:fixed;right:8px;top:8px;z-index:60;color:#ddd;background:#222;padding:4px 8px;border-radius:6px;text-decoration:none">设备授权</a>' : ''}
 <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5/lib/xterm.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0/lib/addon-fit.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-web-links@0/lib/addon-web-links.min.js"></script>
@@ -18718,6 +18920,7 @@ ${loginUrl ? `<a id="login-banner" href="${loginUrl}" target="_top" rel="noopene
 <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-webgl@0/lib/addon-webgl.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-canvas@0/lib/addon-canvas.min.js"></script>
 <script>
+var deviceAuthorization=document.getElementById('device-authorization');if(deviceAuthorization){deviceAuthorization.href='./_device/settings?access='+(new URLSearchParams(location.search).get('access')==='write'?'write':'read');}
 var isTouch='ontouchstart'in window||navigator.maxTouchPoints>0;
 if(isTouch){document.body.classList.add('touch');}
 var hasToken=${hasWrite};
@@ -19251,13 +19454,16 @@ if(typeof ResizeObserver!=='undefined'){
     if(m){try{_clipBuf=new TextDecoder().decode(Uint8Array.from(atob(m[1]),function(c){return c.charCodeAt(0)}));_doCopy(_clipBuf);_showCopied()}catch(ex){}}
     term.write(data,_settleInitialBottom);
   };
-  ws.onclose=function(){
+  ws.onclose=function(e){
     ws_=null;el.textContent='disconnected';el.className='err';
     // 关闭当下就把这条连接的写权限退回未知：先复位首帧标志（重连后要等新首帧才恢复
     // 结论），再 _wbSetWsWrite(null) —— 它同时收起输入（term.onData/toolbar/_fwdScroll
     // 的门禁都以 wsHasWrite===true 为准）并向嵌入方上抛 write:null。不这样做的话，断线
     // 到 2 秒后重连的空窗里，页面仍以上一条连接的旧判定放行输入、父页也还显示旧的可写。
     _wbFirstFrame=true;_wbSetWsWrite(null);
+    if(e.code===${HERDR_WEB_CONTROL_FAILED}){
+      el.textContent=e.reason||'原终端连接不可用；请重新打开页面。';el.title=el.textContent;return;
+    }
     setTimeout(connect,2000);
   };
   ws.onerror=function(){ws.close()};
@@ -20242,6 +20448,7 @@ process.on('message', async (raw: unknown) => {
           break;
         }
       }
+      validateKllLaunch(msg);
       lastInitConfig = msg;
       if (msg.cliInstanceBinding && (msg.cliId !== 'codex' || msg.adoptMode || msg.existingAppServerEndpoint)) {
         throw new Error('Codex instance binding is incompatible with this worker init');
@@ -21798,6 +22005,8 @@ function cleanup(): void {
   clientPtys.clear();
   for (const ws of wsClients) ws.close();
   wsClients.clear();
+  for (const ws of sharedHerdrWsClients) ws.close();
+  sharedHerdrWsClients.clear();
   herdrWebBindings.clear();
   if (wss) { wss.close(); wss = null; }
   if (httpServer) { httpServer.close(); httpServer = null; }

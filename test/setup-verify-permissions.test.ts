@@ -43,6 +43,8 @@ import {
   buildRemainingSteps,
   registerBotmuxRedirectUrlCollector,
   BOTMUX_REQUIRED_SCOPES,
+  BOTMUX_MESSAGE_NARROW_SCOPES,
+  isScopeGranted,
   DOC_FEATURE_SCOPES,
   DOC_WATCH_SCOPES,
   VC_MEETING_BOT_EVENTS,
@@ -154,6 +156,34 @@ describe('validateCredentials', () => {
   });
 });
 
+describe('isScopeGranted', () => {
+  it('accepts the broad message scope or all three narrow message scopes', () => {
+    expect(isScopeGranted('im:message', new Set(['im:message']))).toBe(true);
+    expect(isScopeGranted('im:message', new Set(BOTMUX_MESSAGE_NARROW_SCOPES))).toBe(true);
+  });
+
+  it.each(BOTMUX_MESSAGE_NARROW_SCOPES)('requires the narrow %s operation in the bundle', missing => {
+    const granted = new Set<string>(BOTMUX_MESSAGE_NARROW_SCOPES.filter(scope => scope !== missing));
+    expect(isScopeGranted('im:message', granted)).toBe(false);
+  });
+
+  it('does not infer group history, member management or contact permission from message scopes', () => {
+    const granted = new Set<string>(BOTMUX_MESSAGE_NARROW_SCOPES);
+    for (const scope of ['im:message.group_msg', 'im:chat.members:read', 'im:chat.members:write_only', 'contact:user.base:readonly']) {
+      expect(isScopeGranted(scope, granted)).toBe(false);
+      expect(isScopeGranted(scope, new Set([...granted, scope]))).toBe(true);
+    }
+  });
+
+  it('accepts legacy contact-base permission for user basics without granting the reverse or write access', () => {
+    expect(isScopeGranted('contact:user.base:readonly', new Set(['contact:contact.base:readonly']))).toBe(true);
+    expect(isScopeGranted('contact:user.base:readonly', new Set(['contact:user.base:readonly']))).toBe(true);
+    expect(isScopeGranted('contact:contact.base:readonly', new Set(['contact:user.base:readonly']))).toBe(false);
+    expect(isScopeGranted('contact:user:write', new Set(['contact:contact.base:readonly']))).toBe(false);
+    expect(isScopeGranted('im:chat.members:read', new Set(['contact:contact.base:readonly']))).toBe(false);
+  });
+});
+
 describe('readCriticalScopesFromApplicationInfo', () => {
   it('uses the effective application-info scopes and reports missing critical names', async () => {
     fetchMock
@@ -179,6 +209,75 @@ describe('readCriticalScopesFromApplicationInfo', () => {
       ok: false,
       error: 'need_self_manage',
       message: 'missing application:application:self_manage',
+    });
+  });
+
+  it('accepts the complete narrow message bundle and preserves genuinely missing group permissions', async () => {
+    fetchMock
+      .mockResolvedValueOnce({ json: async () => ({ code: 0, tenant_access_token: 'tenant-token' }) })
+      .mockResolvedValueOnce({ json: async () => ({ code: 0, data: { app: { scopes: BOTMUX_MESSAGE_NARROW_SCOPES.map(scope => ({ scope, token_types: ['tenant'] })) } } }) });
+    const result = await readCriticalScopesFromApplicationInfo('cli_x', 'secret');
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.missingCritical.map(scope => scope.name)).not.toContain('im:message');
+      expect(result.missingCritical.map(scope => scope.name)).toEqual(expect.arrayContaining([
+        'im:message.group_msg', 'im:chat.members:read', 'im:chat.members:write_only', 'contact:user.base:readonly',
+      ]));
+    }
+  });
+
+  it('recognizes the current message and contact grants while retaining the three missing group capabilities', async () => {
+    const missing = ['im:message.group_msg', 'im:chat.members:read', 'im:chat.members:write_only'];
+    const scopes = [
+      ...BOTMUX_REQUIRED_SCOPES.filter(scope => scope.critical
+        && scope.name !== 'im:message' && scope.name !== 'contact:user.base:readonly'
+        && !missing.includes(scope.name)).map(scope => scope.name),
+      ...BOTMUX_MESSAGE_NARROW_SCOPES,
+      'contact:contact.base:readonly',
+      'offline_access',
+    ];
+    fetchMock
+      .mockResolvedValueOnce({ json: async () => ({ code: 0, tenant_access_token: 'tenant-token' }) })
+      .mockResolvedValueOnce({ json: async () => ({ code: 0, data: { app: { scopes } } }) });
+    const result = await readCriticalScopesFromApplicationInfo('cli_x', 'secret');
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.granted).toContain('offline_access');
+      expect(result.missingCritical.map(scope => scope.name)).toEqual(missing);
+    }
+  });
+
+  it('accepts unfamiliar nonempty platform scope identifiers without inferring permissions from them', async () => {
+    fetchMock
+      .mockResolvedValueOnce({ json: async () => ({ code: 0, tenant_access_token: 'tenant-token' }) })
+      .mockResolvedValueOnce({ json: async () => ({ code: 0, data: { app: { scopes: ['offline_access', { scope: 'new-platform-scope' }] } } }) });
+    const result = await readCriticalScopesFromApplicationInfo('cli_x', 'secret');
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.granted).toEqual(['offline_access', 'new-platform-scope']);
+      expect(result.missingCritical).toEqual(BOTMUX_REQUIRED_SCOPES.filter(scope => scope.critical));
+    }
+  });
+
+  it.each(BOTMUX_MESSAGE_NARROW_SCOPES)('reports the message capability missing when narrow %s is absent', async missing => {
+    const scopes = BOTMUX_MESSAGE_NARROW_SCOPES.filter(scope => scope !== missing);
+    fetchMock
+      .mockResolvedValueOnce({ json: async () => ({ code: 0, tenant_access_token: 'tenant-token' }) })
+      .mockResolvedValueOnce({ json: async () => ({ code: 0, data: { app: { scopes } } }) });
+    const result = await readCriticalScopesFromApplicationInfo('cli_x', 'secret');
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.missingCritical.map(scope => scope.name)).toContain('im:message');
+  });
+
+  it.each([
+    undefined, [], {}, 'im:message', [null], [{}], [{ scope: 3 }], [''],
+    [' '], ['im:message readonly'], ['im:message\u0000'], [{ scope: 'im:message' }, { scope: null }],
+  ])('keeps malformed or empty application scopes inconclusive: %j', async scopes => {
+    fetchMock
+      .mockResolvedValueOnce({ json: async () => ({ code: 0, tenant_access_token: 'tenant-token' }) })
+      .mockResolvedValueOnce({ json: async () => ({ code: 0, data: { app: { scopes } } }) });
+    expect(await readCriticalScopesFromApplicationInfo('cli_x', 'secret')).toEqual({
+      ok: false, error: 'unknown', message: 'application info scope readback inconclusive',
     });
   });
 });
@@ -329,6 +428,15 @@ describe('BOTMUX_REQUIRED_SCOPES', () => {
     expect(names).toContain('im:resource');
     expect(names).toContain('im:chat:read');
     expect(names).toContain('contact:user.base:readonly');
+  });
+
+  it('requires im:message.p2p_msg:readonly so user DMs reach the bot', () => {
+    // 缺它时用户私聊 bot 的消息不会投递到 WSClient，且没有替代 scope。此前它只在
+    // lark-scopes.json 创建申请集里、不在核验集里——应用真缺它时 setup 回读与启动
+    // 自检都不会报警。锁死：单聊接收必须 critical。
+    const entry = BOTMUX_REQUIRED_SCOPES.find(s => s.name === 'im:message.p2p_msg:readonly');
+    expect(entry, 'im:message.p2p_msg:readonly should be in BOTMUX_REQUIRED_SCOPES').toBeDefined();
+    expect(entry?.critical).toBe(true);
   });
 
   it('requires im:message.group_msg so the bot can fetch group history (botmux history)', () => {

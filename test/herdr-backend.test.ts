@@ -29,9 +29,15 @@ vi.mock('node-pty', () => ({
   spawn: vi.fn(),
 }));
 
+vi.mock('../src/services/codebuddy-transcript.js', async importOriginal => ({
+  ...await importOriginal<typeof import('../src/services/codebuddy-transcript.js')>(),
+  codebuddySession: vi.fn(),
+}));
+
 import { execFileSync, spawn } from 'node:child_process';
 import * as pty from 'node-pty';
 import { HerdrBackend } from '../src/adapters/backend/herdr-backend.js';
+import { codebuddySession } from '../src/services/codebuddy-transcript.js';
 
 const mockedExecFileSync = vi.mocked(execFileSync);
 const mockedSpawn = vi.mocked(spawn);
@@ -194,6 +200,17 @@ afterEach(() => {
 // ─── Backend connection surface ────────────────────────────────────────────
 
 describe('HerdrBackend connection surface', () => {
+  it.each(['herdr 0.7.4\n', 'herdr 0.6.6\n', 'unknown'])('rejects legacy environment-in-argv launch for KLL: %s', version => {
+    mockedExecFileSync.mockImplementation((() => version) as any);
+    expect(() => HerdrBackend.assertProtectedEnvironmentLaunch()).toThrow('Herdr >=0.7.5');
+    expect(mockedExecFileSync.mock.calls.every(call => (call[1] as string[]).includes('--version'))).toBe(true);
+  });
+  it('accepts protected managed-pane launch for KLL and refuses an unavailable version probe', () => {
+    mockedExecFileSync.mockImplementation((() => 'herdr 0.7.5\n') as any);
+    expect(() => HerdrBackend.assertProtectedEnvironmentLaunch()).not.toThrow();
+    mockedExecFileSync.mockImplementation((() => { throw new Error('ENOENT'); }) as any);
+    expect(() => HerdrBackend.assertProtectedEnvironmentLaunch()).toThrow('Herdr >=0.7.5');
+  });
   it('isAvailable() returns true when `herdr --version` succeeds', () => {
     mockedExecFileSync.mockImplementation((() => 'herdr 1.0\n') as any);
     expect(HerdrBackend.isAvailable()).toBe(true);
@@ -365,6 +382,64 @@ describe('HerdrBackend connection surface', () => {
 // ─── spawn(): fresh / existing / external ──────────────────────────────────
 
 describe('HerdrBackend.spawn', () => {
+  it('keeps provider secrets out of Herdr argv and quotes the private launcher environment', () => {
+    const captured = setManagedLaunchResponses('claude');
+    const secret = "token'\n$(touch /tmp/must-not-run)`whoami`";
+    const be = new HerdrBackend(SESSION);
+    try {
+      be.spawn('/native/claude', ['--session-id', 'sid-1'], {
+        cwd: '/work', cols: 120, rows: 30, env: { PATH: '/usr/bin:/bin' },
+        injectEnv: { ANTHROPIC_API_KEY: secret },
+      });
+      expect(captured.launcherMode).toBe(0o700);
+      expect(captured.launcherScript).toContain("export ANTHROPIC_API_KEY='token'\"'\"'\n$(touch /tmp/must-not-run)`whoami`'");
+      expect(mockedExecFileSync.mock.calls.flatMap(call => call[1] ?? []).join(' ')).not.toContain(secret);
+      expect(herdrCall('workspace', 'create')).not.toContain('--env');
+    } finally { be.kill(); }
+  });
+  it('launches native CodeBuddy with its own verified identity and releases only the viewer', () => {
+    const nativeId = '00000000-0000-4000-8000-000000000001';
+    vi.mocked(codebuddySession).mockReturnValue({sessionId:nativeId,cwd:'/work'});
+    const captured = setManagedLaunchResponses('codebuddy', [
+      {match:a=>a.includes('process-info'),reply:()=>JSON.stringify({result:{process_info:{shell_pid:10,foreground_processes:[{pid:42,argv:['/opt/WorkBuddy/codebuddy']}]}}})},
+      {match:a=>a.includes('pane')&&a.includes('get'),reply:()=>JSON.stringify({result:{pane:{terminal_id:'term_native',cwd:'/work',agent_status:'unknown'}}})},
+    ]);
+    const mock = mockedExecFileSync.getMockImplementation()!;
+    mockedExecFileSync.mockImplementation(((cmd:any,...args:any[]) => cmd==='ps' ? 'original birth time' : (mock as any)(cmd,...args)) as any);
+    const be = new HerdrBackend(SESSION);
+    try {
+      be.spawn('/opt/WorkBuddy/codebuddy',['--session-id',nativeId,'--model','hy3'],{
+        cwd:'/work',cols:120,rows:40,env:{PATH:'/usr/bin',CODEBUDDY_API_KEY:'parent-only',CODEX_THREAD_ID:'parent-only',CLAUDECODE:'1',TERM_PROGRAM:'WorkBuddy',HTTP_PROXY:'http://localhost:7899'},
+      });
+      expect(herdrCall('pane','report-agent')).toEqual(['--session',SESSION,'pane','report-agent',MANAGED_PANE,'--source','botmux-codebuddy','--agent','codebuddy','--state','unknown','--agent-session-id',nativeId]);
+      expect(herdrCall('agent','start')).toBeUndefined();
+      expect(captured.launcherScript).toContain("'--model' 'hy3'");
+      const env = herdrCall('workspace','create')!.join(' ');
+      expect(env).not.toContain('parent-only');
+      expect(captured.launcherScript).toContain("export TERM_PROGRAM='herdr'");
+      expect(captured.launcherScript).toContain("export HTTP_PROXY='http://localhost:7899'");
+      expect(captured.launcherScript).toContain("export CODEBUDDY_API_KEY='parent-only'");
+      expect(captured.launcherScript).not.toContain('CODEX_THREAD_ID');
+      expect(be.getChildPid()).toBe(42);
+    } finally {be.kill();vi.mocked(codebuddySession).mockReset();}
+    expect(herdrCall('workspace','close')).toBeUndefined();
+    expect(herdrCall('pane','close')).toBeUndefined();
+    expect(herdrCall('session','stop')).toBeUndefined();
+  });
+
+  it('rejects a replacement CodeBuddy native identity and closes only its new workspace', () => {
+    vi.mocked(codebuddySession).mockReturnValue({sessionId:'00000000-0000-4000-8000-000000000002',cwd:'/work'});
+    setManagedLaunchResponses('codebuddy', [
+      {match:a=>a.includes('process-info'),reply:()=>JSON.stringify({result:{process_info:{foreground_processes:[{pid:42,argv:['codebuddy']}]}}})},
+    ]);
+    const be = new HerdrBackend(SESSION);
+    try {
+      expect(()=>be.spawn('codebuddy',['--resume','00000000-0000-4000-8000-000000000001'],{cwd:'/work',cols:120,rows:40,env:{}})).toThrow(/原生会话不一致/);
+      expect(herdrCall('workspace','close')).toEqual(['--session',SESSION,'workspace','close',MANAGED_WORKSPACE]);
+      expect(herdrCall('pane','report-agent')).toBeUndefined();
+    } finally {be.kill();vi.mocked(codebuddySession).mockReset();}
+  });
+
   it.each([
     { label: 'prompt-file', prompt: '@/tmp/initial.prompt.md', explicitCliBin: true },
     { label: 'multiline', prompt: 'line one\nline two', explicitCliBin: false },
@@ -381,14 +456,12 @@ describe('HerdrBackend.spawn', () => {
     expect(herdrCall('workspace', 'create')).toEqual([
       '--session', SESSION, 'workspace', 'create',
       '--cwd', '/work', '--label', 'botmux', '--no-focus',
-      '--env', 'PATH=/Users/test/.local/bin/node/bin:/usr/bin:/bin',
-      '--env', 'BOTMUX_SESSION_ID=sid-1',
     ]);
     const launcherPath = paneLauncherPath();
     expect(basename(launcherPath)).toBe('pi');
     expect(captured.launcherMode).toBe(0o700);
     expect(captured.launcherScript).toContain(
-      "PATH='/Users/test/.local/bin/node/bin:/usr/bin:/bin'\nexport PATH\n"
+      "export PATH='/Users/test/.local/bin/node/bin:/usr/bin:/bin'\nexport BOTMUX_SESSION_ID='sid-1'\n"
       + "exec '" + cliBin + "' '--session-id' 'sid-1' '" + prompt + "'\n",
     );
     expect(captured.pollCount).toBe(2);
@@ -443,10 +516,10 @@ describe('HerdrBackend.spawn', () => {
 
     const launcherPath = paneLauncherPath();
     expect(basename(launcherPath)).toBe('claude');
-    expect(herdrCall('workspace', 'create')).toContain('PATH=/home/test/.local/bin:/usr/bin:/bin');
+    expect(herdrCall('workspace', 'create')).not.toContain('--env');
     // Read during the first detection poll, while the launcher still exists.
     expect(captured.launcherScript).toContain(
-      "PATH='/home/test/.local/bin:/usr/bin:/bin'\nexport PATH\n"
+      "export PATH='/home/test/.local/bin:/usr/bin:/bin'\nexport BOTMUX_SESSION_ID='sid-1'\n"
       + "exec '/usr/bin/env' 'XDG_RUNTIME_DIR=/run/user/1000' 'DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus' "
       + "'systemd-run' '--user' '--scope' '--quiet' '--collect' "
       + "'--unit=botmux-session-sid-1.scope' '--property=KillMode=control-group' "
@@ -1275,6 +1348,68 @@ describe('HerdrBackend callbacks', () => {
 
     agentAlive = false;
     vi.advanceTimersByTime(600);
+    expect(exits).toEqual([[0, null]]);
+  });
+
+  it('agent list probe failures do NOT report an exit while the herdr session still exists', () => {
+    // A busy shared herdr server (several daemons polling in bursts) can fail
+    // `agent list` a few polls in a row; that says nothing about the CLI
+    // process. Reporting an exit on probe failures alone killed healthy
+    // first-turn launches right after spawn (the spawn's own detection/rename
+    // `agent list` calls contend with the very first polls).
+    let listBroken = false;
+    setHerdrResponses([
+      { match: a => a[0] === 'session' && a[1] === 'list', reply: () => EXISTING_SESSION_REPLY },
+      { match: a => a.includes('agent') && a.includes('get'), reply: () => AGENT_GET_REPLY('1-1') },
+      {
+        match: a => a.includes('agent') && a.includes('list'),
+        reply: () => {
+          if (listBroken) throw new Error('agent_list_failed');
+          return AGENT_LIST_REPLY('1-1');
+        },
+      },
+      { match: a => a.includes('read') && (a.includes('agent') || a.includes('pane')), reply: () => PANE_READ_REPLY('') },
+    ]);
+
+    vi.useFakeTimers();
+    const be = new HerdrBackend(SESSION, { isReattach: true });
+    const exits: Array<[number | null, string | null]> = [];
+    be.onExit((code, signal) => exits.push([code, signal]));
+    be.spawn('claude', [], { cwd: '/work', cols: 80, rows: 24, env: {} });
+
+    listBroken = true;
+    vi.advanceTimersByTime(20_000);
+    expect(exits).toEqual([]);
+    be.kill();
+  });
+
+  it('agent list probe failures DO report an exit once the herdr session itself is gone', () => {
+    let listBroken = false;
+    let sessionGone = false;
+    setHerdrResponses([
+      { match: a => a[0] === 'session' && a[1] === 'list', reply: () => (sessionGone ? EMPTY_SESSIONS_REPLY : EXISTING_SESSION_REPLY) },
+      { match: a => a.includes('agent') && a.includes('get'), reply: () => AGENT_GET_REPLY('1-1') },
+      {
+        match: a => a.includes('agent') && a.includes('list'),
+        reply: () => {
+          if (listBroken) throw new Error('agent_list_failed');
+          return AGENT_LIST_REPLY('1-1');
+        },
+      },
+      { match: a => a.includes('read') && (a.includes('agent') || a.includes('pane')), reply: () => PANE_READ_REPLY('') },
+    ]);
+
+    vi.useFakeTimers();
+    const be = new HerdrBackend(SESSION, { isReattach: true });
+    const exits: Array<[number | null, string | null]> = [];
+    be.onExit((code, signal) => exits.push([code, signal]));
+    be.spawn('claude', [], { cwd: '/work', cols: 80, rows: 24, env: {} });
+
+    listBroken = true;
+    vi.advanceTimersByTime(3_000);
+    expect(exits).toEqual([]);
+    sessionGone = true;
+    vi.advanceTimersByTime(3_000);
     expect(exits).toEqual([[0, null]]);
   });
 

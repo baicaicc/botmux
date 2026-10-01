@@ -8,6 +8,7 @@ const DSH_MODEL_CHOICES = ['deepseek-v4-flash', 'deepseek-v4-pro'] as const;
 
 /** Explicitly account for every CLI; undefined means it has no curated list. */
 export const CLI_MODEL_CHOICES: Readonly<Record<CliId, readonly string[] | undefined>> = {
+  codebuddy: undefined,
   'claude-code': ['fable', 'opus', 'sonnet', 'haiku', 'claude-fable-5', 'claude-opus-5', 'claude-sonnet-5', 'claude-haiku-4-5-20251001'],
   'seed': undefined,
   'relay': undefined,
