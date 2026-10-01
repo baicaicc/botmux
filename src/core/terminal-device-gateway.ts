@@ -8,7 +8,10 @@ const COOKIE = '__Host-botmux_terminal_device';
 const DEVICE_SECONDS = 180 * 24 * 60 * 60;
 
 export interface TerminalDeviceSession {
+  /** Owner key compared with device records (a deployment principal when shared). */
   ownerId: string;
+  /** Real Lark owner recorded in the worker grant for audit; defaults to ownerId. */
+  auditUserId?: string;
   writeToken: string | null;
   viewToken: string | null;
 }
@@ -21,6 +24,8 @@ export interface TerminalDeviceGatewayOptions {
   session: (sessionId: string) => TerminalDeviceSession | null;
   notifyPairing: (sessionId: string, code: string, scope: TerminalControlScope) => Promise<void>;
   cookieName?: string;
+  /** Also accept these older cookie names (e.g. per-bot names before identity sharing). */
+  legacyCookieNames?: RegExp;
 }
 
 function headersFor(request: TerminalProxyRequest): Map<string, string> | null {
@@ -42,6 +47,10 @@ function deviceToken(headers: Map<string, string>, name: string): string | undef
   if (values.length !== 1) return undefined;
   const value = values[0].slice(name.length + 1);
   return /^[A-Za-z0-9_-]{43}$/.test(value) ? value : undefined;
+}
+
+function cookieNames(headers: Map<string, string>): string[] {
+  return (headers.get('cookie') ?? '').split(';').map(x => x.trim().split('=')[0]).filter(Boolean);
 }
 
 function escaped(value: string): string {
@@ -84,6 +93,19 @@ export class TerminalDeviceGateway {
     if (!/^__Host-[A-Za-z0-9_-]+$/.test(this.cookieName)) throw new Error('invalid terminal device cookie name');
   }
 
+  /** The current cookie first; a legacy cookie only when it names a paired device. */
+  private deviceCookie(headers: Map<string, string>): { token: string | undefined; name: string } {
+    const current = deviceToken(headers, this.cookieName);
+    const legacy = this.options.legacyCookieNames;
+    if (!legacy || (current && this.options.store.identity(current))) return { token: current, name: this.cookieName };
+    for (const name of new Set(cookieNames(headers))) {
+      if (name === this.cookieName || !legacy.test(name)) continue;
+      const token = deviceToken(headers, name);
+      if (token && this.options.store.identity(token)) return { token, name };
+    }
+    return { token: current, name: this.cookieName };
+  }
+
   async authorize(request: TerminalProxyRequest): Promise<TerminalProxyAuthorization> {
     try { return await this.check(request); }
     catch { return response(503, '设备授权暂时不可用，请稍后重试。'); }
@@ -111,7 +133,7 @@ export class TerminalDeviceGateway {
     if (headers.has('transfer-encoding') || (headers.has('content-length') && headers.get('content-length') !== '0')) return response(400, 'Bad Request');
     const session = this.options.session(request.sessionId);
     if (!session?.ownerId) return response(403, '请从当前会话的 Lark 授权链接进入。');
-    const token = deviceToken(headers, this.cookieName);
+    const { token, name: tokenCookie } = this.deviceCookie(headers);
     let identity = token ? this.options.store.identity(token) : null;
     const base = `/s/${request.sessionId}/`;
     const queryWrite = url.searchParams.get('token');
@@ -137,7 +159,7 @@ export class TerminalDeviceGateway {
     if (url.pathname === '/_device/forget') {
       if (request.method !== 'POST' || request.isUpgrade || !token || !identity) return response(403, 'Forbidden');
       this.options.store.revoke(token);
-      return response(200, '此浏览器的设备配对已取消。请重新打开 Lark 链接。', { 'Set-Cookie': `${this.cookieName}=; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=0` });
+      return response(200, '此浏览器的设备配对已取消。请重新打开 Lark 链接。', { 'Set-Cookie': `${tokenCookie}=; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=0` });
     }
     if (request.method !== 'GET' && request.method !== 'HEAD') return response(405, 'Method Not Allowed');
     if (hasCapability && !request.isUpgrade) {
@@ -168,7 +190,7 @@ export class TerminalDeviceGateway {
     const secret = this.options.secret();
     if (!secret) return response(503, '设备授权暂时不可用，请稍后重试。');
     const grant = issueTerminalControlGrant(secret, {
-      scope, sessionId: request.sessionId, userId: access.ownerId, authSessionId: access.deviceId,
+      scope, sessionId: request.sessionId, userId: session.auditUserId ?? access.ownerId, authSessionId: access.deviceId,
       issuedAt: Date.now(), expiresAt: Math.min(access.expiresAt, Date.now() + 30 * 60 * 1000),
     });
     const forwarded = request.headers.filter(line => !/^(cookie|authorization|x-botmux-[^:]*|forwarded|x-forwarded-[^:]*|cf-access-[^:]*)\s*:/i.test(line));

@@ -379,7 +379,7 @@ import {
   withIsolatedDispatchSinkFence,
 } from './core/dispatch-output-sink.js';
 import { TerminalDeviceGateway } from './core/terminal-device-gateway.js';
-import { terminalDeviceStoreForBot, buildTerminalDevicePairingCard } from './core/terminal-device-pairing.js';
+import { terminalDeviceStoreForBot, buildTerminalDevicePairingCard, terminalDeviceOwnerKey, terminalDeviceSharedAcrossBots } from './core/terminal-device-pairing.js';
 import { loadDashboardSecret } from './dashboard/auth.js';
 import { deriveTerminalWriteToken } from './core/terminal-write-auth.js';
 import { runtimeInstallationKey } from './adapters/cli/runtime.js';
@@ -5300,6 +5300,9 @@ interface DaemonDescriptor {
    * never sees them; empty if the bot has no allowlist configured.
    */
   resolvedAllowedUsers: string[];
+  /** Bound terminal reverse-proxy port, so a peer daemon's proxy can hand over
+   *  `/s/<sessionId>` requests for sessions this daemon owns. */
+  terminalProxyPort?: number;
 }
 
 function writeDaemonDescriptor(d: DaemonDescriptor): void {
@@ -31328,7 +31331,11 @@ export async function startDaemon(botIndex?: number): Promise<void> {
     const deviceStore = terminalDeviceStoreForBot(cfg.larkAppId);
     const deviceGateway = deviceStore ? new TerminalDeviceGateway({
       store: deviceStore,
-      cookieName: `__Host-botmux_terminal_device_${createHash('sha256').update(cfg.larkAppId).digest('hex').slice(0, 12)}`,
+      // Shared identity: one cookie for every bot; per-bot cookies paired before
+      // the switch stay valid (their devices were imported into the shared store).
+      ...(terminalDeviceSharedAcrossBots()
+        ? { cookieName: '__Host-botmux_terminal_device', legacyCookieNames: /^__Host-botmux_terminal_device_[0-9a-f]{12}$/ }
+        : { cookieName: `__Host-botmux_terminal_device_${createHash('sha256').update(cfg.larkAppId).digest('hex').slice(0, 12)}` }),
       origin: process.env.BOTMUX_PUBLIC_URL ?? '',
       secret: () => loadDashboardSecret(join(homedir(), '.botmux', '.dashboard-secret')),
       session: sessionId => {
@@ -31337,7 +31344,7 @@ export async function startDaemon(botIndex?: number): Promise<void> {
         const ownerId = ds && getOwnerOpenId(ds.larkAppId);
         if (!ds || !ownerId) return null;
         const secret = loadDashboardSecret(join(homedir(), '.botmux', '.dashboard-secret'));
-        return { ownerId, writeToken: ds.workerToken ?? (secret ? deriveTerminalWriteToken(secret, sessionId) : null), viewToken: ds.workerViewToken ?? null };
+        return { ownerId: terminalDeviceOwnerKey(ownerId), auditUserId: ownerId, writeToken: ds.workerToken ?? (secret ? deriveTerminalWriteToken(secret, sessionId) : null), viewToken: ds.workerViewToken ?? null };
       },
       notifyPairing: async (sessionId, code, scope) => {
         const ds = [...activeSessions.values()].find(current => current.larkAppId === cfg.larkAppId && current.session.sessionId === sessionId);
@@ -31350,6 +31357,20 @@ export async function startDaemon(botIndex?: number): Promise<void> {
       port: proxyPort,
       host: terminalProxyHost,
       ...(deviceGateway ? { authorizeRequest: request => deviceGateway.authorize(request) } : {}),
+      // One public entry for every bot: a session owned by a sibling daemon is
+      // handed to that daemon's proxy, which applies its own guard.
+      resolvePeerPort: (sessionId) => {
+        for (const ds of activeSessions.values()) {
+          if (ds.session.sessionId === sessionId) return undefined;
+        }
+        try {
+          const owners = new Set(sessionStore.readSessionRowCopiesAcrossStores(sessionId).matches.map(row => row.larkAppId));
+          const [owner] = owners;
+          if (owners.size !== 1 || !owner || owner === cfg.larkAppId) return undefined;
+          const port = findOnlineDaemon(owner)?.terminalProxyPort;
+          return port && port !== terminalProxy?.port ? port : undefined;
+        } catch { return undefined; }
+      },
       resolvePort: (sessionId) => {
         for (const ds of activeSessions.values()) {
           if (ds.session.sessionId === sessionId && sessionSupportsWebTerminal(ds) && ds.workerPort) {
@@ -31439,6 +31460,8 @@ export async function startDaemon(botIndex?: number): Promise<void> {
     // falls back to the worker's own port so links stay reachable if the port
     // was taken (e.g. EADDRINUSE).
     setTerminalProxyPort(terminalProxy.port);
+    desc.terminalProxyPort = terminalProxy.port;
+    try { writeDaemonDescriptor(desc); } catch { /* best effort; next heartbeat rewrites it */ }
     logger.info(`[terminal-proxy] listening on ${terminalProxyHost}:${terminalProxy.port} (bot ${idx}) — session terminals at /s/{sessionId}`);
   } catch (err) {
     if (process.env.BOTMUX_TERMINAL_DEVICE_PAIRING === '1') {

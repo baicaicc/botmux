@@ -12,7 +12,8 @@ import { buildTerminalUrl } from './terminal-url.js';
 import { getBot, getAllBots, getBotOpenId, getOwnerOpenId, findOncallChat, effectiveDefaultWorkingDir, loadBotConfigs, type BotConfig } from '../bot-registry.js';
 import { triggerUserAuthApplies, credentialSourceOf } from '../services/trigger-user-auth.js';
 import { platformCredentialsUrl } from '../platform/credential-grant-client.js';
-import { approveTerminalDevice, terminalDeviceStoreForBot } from './terminal-device-pairing.js';
+import { approveTerminalDevice, terminalDeviceOwnerKey, terminalDeviceStoreForBot } from './terminal-device-pairing.js';
+
 import { beginBytedcliLogin, completeBytedcliLogin, pendingBytedcliChallenge, hasBytedcliHome } from '../services/bytedcli-auth.js';
 import { beginLarkCliLogin, completeLarkCliLogin, pendingLarkCliChallenge, hasLarkCliHome } from '../services/lark-cli-auth.js';
 import { isLarkToolBound } from './lark-tool-binding.js';
@@ -1714,7 +1715,7 @@ export async function handleTermLinkCommand(
     try {
       const store = terminalDeviceStoreForBot(larkAppId);
       if (!store) { await reply('当前入口尚未开启设备配对。'); return; }
-      store.revokeSession({ sessionId: ds.session.sessionId, ownerId: senderOpenId });
+      store.revokeSession({ sessionId: ds.session.sessionId, ownerId: terminalDeviceOwnerKey(senderOpenId) });
       await reply('当前会话的设备授权已撤销；已有网页连接会断开。可从 Lark 新链接重新授权。');
     } catch { await reply('设备授权暂时不可用，请稍后重试。'); }
     return;

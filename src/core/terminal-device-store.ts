@@ -1,7 +1,7 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import {
-  chmodSync, closeSync, fsyncSync, mkdirSync, openSync, readFileSync,
-  renameSync, unlinkSync, writeFileSync,
+  chmodSync, closeSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync,
+  renameSync, statSync, unlinkSync, writeFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
 import { z } from 'zod';
@@ -11,6 +11,10 @@ export const TERMINAL_DEVICE_TTL_MS = 180 * 24 * 60 * 60_000;
 export const TERMINAL_DEVICE_SESSION_TTL_MS = 30 * 24 * 60 * 60_000;
 export const TERMINAL_DEVICE_PAIR_TTL_MS = 5 * 60_000;
 export const TERMINAL_DEVICE_PENDING_LIMIT = 100;
+/** Writers in different daemons wait this long for the store lock. */
+const LOCK_WAIT_MS = 3_000;
+/** A lock older than this was left by a crashed writer (writes take milliseconds). */
+const LOCK_STALE_MS = 10_000;
 
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const identifier = z.string().min(1).max(512).refine(value => !/[\r\n\0]/.test(value));
@@ -103,6 +107,7 @@ function identityOf(device: Device, expiresAt = device.expiresAt): TerminalDevic
  * browser identity alone never authorizes another session.
  */
 export class TerminalDeviceStore {
+  private readonly dataDir: string;
   private readonly directory: string;
   private readonly path: string;
   private readonly botId: string;
@@ -115,11 +120,30 @@ export class TerminalDeviceStore {
     }
     this.botId = options.botId;
     this.clock = options.now ?? Date.now;
+    this.dataDir = options.dataDir;
     this.directory = join(options.dataDir, 'terminal-devices');
     this.path = join(this.directory, `${createHash('sha256').update(this.botId).digest('hex')}.json`);
   }
 
-  startPair(input: {
+  // Every read-modify-write runs under a file lock: with a deployment-wide
+  // store several daemons write the same file.
+  startPair(input: Parameters<TerminalDeviceStore['startPairUnlocked']>[0]): TerminalDevicePairing {
+    return this.locked(() => this.startPairUnlocked(input));
+  }
+  approve(input: Parameters<TerminalDeviceStore['approveUnlocked']>[0]): TerminalDeviceApprovalResult {
+    return this.locked(() => this.approveUnlocked(input));
+  }
+  grant(input: TerminalDeviceGrantInput): TerminalDeviceIdentity | null {
+    return this.locked(() => this.grantUnlocked(input));
+  }
+  revoke(browserToken: string): boolean {
+    return this.locked(() => this.revokeUnlocked(browserToken));
+  }
+  revokeSession(input: { sessionId: string; ownerId: string }): number {
+    return this.locked(() => this.revokeSessionUnlocked(input));
+  }
+
+  private startPairUnlocked(input: {
     sessionId: string; scope: TerminalDeviceScope; ownerId: string; browserToken?: string;
   }): TerminalDevicePairing {
     this.validateContext(input);
@@ -152,7 +176,7 @@ export class TerminalDeviceStore {
     return { code, browserToken, expiresAt };
   }
 
-  approve(input: { code: string; sessionId: string; ownerId: string }): TerminalDeviceApprovalResult {
+  private approveUnlocked(input: { code: string; sessionId: string; ownerId: string }): TerminalDeviceApprovalResult {
     if (!identifier.safeParse(input.sessionId).success || !identifier.safeParse(input.ownerId).success
       || typeof input.code !== 'string') throw new TerminalDeviceStoreError('invalid_arguments');
     const now = this.now();
@@ -190,7 +214,7 @@ export class TerminalDeviceStore {
     return device ? identityOf(device) : null;
   }
 
-  grant(input: TerminalDeviceGrantInput): TerminalDeviceIdentity | null {
+  private grantUnlocked(input: TerminalDeviceGrantInput): TerminalDeviceIdentity | null {
     this.validateContext(input);
     const now = this.now();
     const state = this.load();
@@ -218,7 +242,7 @@ export class TerminalDeviceStore {
     return identityOf(device, Math.min(device.expiresAt, Math.max(...grants.map(item => item.expiresAt))));
   }
 
-  revoke(browserToken: string): boolean {
+  private revokeUnlocked(browserToken: string): boolean {
     const state = this.load();
     const tokenHash = hashToken(browserToken);
     if (!tokenHash) return false;
@@ -232,7 +256,7 @@ export class TerminalDeviceStore {
     return true;
   }
 
-  revokeSession(input: { sessionId: string; ownerId: string }): number {
+  private revokeSessionUnlocked(input: { sessionId: string; ownerId: string }): number {
     if (!identifier.safeParse(input.sessionId).success || !identifier.safeParse(input.ownerId).success) {
       throw new TerminalDeviceStoreError('invalid_arguments');
     }
@@ -245,6 +269,71 @@ export class TerminalDeviceStore {
     state.pending = state.pending.filter(item => !matches(item));
     this.save(state);
     return removed;
+  }
+
+  /**
+   * Imports per-bot stores into this (deployment-wide) store once, keeping
+   * every device's id and fixed lifetime and every session grant. Records
+   * are re-owned by `ownerId`, the deployment principal. Imported files are
+   * renamed to `*.json.migrated` (kept as backup, ignored by readers).
+   * Unreadable files are left untouched. No-op once this store exists.
+   */
+  importLegacyStores(ownerId: string): number {
+    if (!identifier.safeParse(ownerId).success) throw new TerminalDeviceStoreError('invalid_arguments');
+    return this.locked(() => {
+      try { readFileSync(this.path); return 0; } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw new TerminalDeviceStoreError('store_unavailable');
+      }
+      const now = this.now();
+      const state = this.load();
+      const own = this.path.slice(this.directory.length + 1);
+      const imported: string[] = [];
+      for (const name of readdirSync(this.directory).sort()) {
+        if (!name.endsWith('.json') || name === own) continue;
+        let legacy: State;
+        try {
+          legacy = stateSchema.parse(JSON.parse(readFileSync(join(this.directory, name), 'utf8')));
+          if (`${createHash('sha256').update(legacy.botId).digest('hex')}.json` !== name) continue;
+          new TerminalDeviceStore({ dataDir: this.dataDir, botId: legacy.botId, now: this.clock }).load();
+        } catch { continue; }
+        for (const device of legacy.devices) {
+          if (device.expiresAt <= now || state.devices.some(item => item.tokenHash === device.tokenHash || item.deviceId === device.deviceId)) continue;
+          state.devices.push({ ...device, ownerId });
+        }
+        for (const grant of legacy.grants) {
+          if (grant.expiresAt <= now || !legacy.devices.some(item => item.tokenHash === grant.tokenHash && item.ownerId === grant.ownerId)) continue;
+          if (state.grants.some(item => item.tokenHash === grant.tokenHash && item.sessionId === grant.sessionId && item.scope === grant.scope)) continue;
+          state.grants.push({ ...grant, ownerId });
+        }
+        imported.push(name);
+      }
+      if (!imported.length) return 0;
+      this.prune(state, now);
+      this.save(state);
+      for (const name of imported) renameSync(join(this.directory, name), join(this.directory, `${name}.migrated`));
+      return imported.length;
+    });
+  }
+
+  /** Serializes read-modify-write across daemons sharing one store file. */
+  private locked<T>(fn: () => T): T {
+    const lock = `${this.path}.lock`;
+    const deadline = Date.now() + LOCK_WAIT_MS;
+    try { mkdirSync(this.directory, { recursive: true, mode: 0o700 }); }
+    catch { throw new TerminalDeviceStoreError('store_unavailable'); }
+    for (;;) {
+      try { closeSync(openSync(lock, 'wx', 0o600)); break; }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw new TerminalDeviceStoreError('store_unavailable');
+        try {
+          if (Date.now() - statSync(lock).mtimeMs > LOCK_STALE_MS) { unlinkSync(lock); continue; }
+        } catch { continue; }
+        if (Date.now() >= deadline) throw new TerminalDeviceStoreError('store_unavailable');
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+      }
+    }
+    try { return fn(); }
+    finally { try { unlinkSync(lock); } catch { /* already removed as stale */ } }
   }
 
   private addGrant(state: State, device: Device, sessionId: string, scope: TerminalDeviceScope, now: number): number {
