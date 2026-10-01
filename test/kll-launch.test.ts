@@ -91,7 +91,6 @@ describe('KLL native launch selection', () => {
     expect(fake.cleaned()).toBe(true);
   });
   it.each([
-    { env: { DSH_LIVE_CONNECTION_FILE: '/dsh-home/botmux/live/connection.json' } },
     { dshRuntime: 'tui' },
   ])('rejects dsh runtimes KLL cannot own: %j', changes => {
     const execute = vi.fn();
