@@ -1121,9 +1121,14 @@ export class HerdrBackend implements SessionBackend {
     if (this.exited) return;
     const timer = setTimeout(() => {
       this.pollTimer = null;
-      this.poll();
-      // poll() may already have re-armed through wakePolling().
-      if (this.pollTimer === null) this.schedulePoll();
+      try {
+        this.poll();
+      } finally {
+        // Keep the chain alive even if poll() throws (setInterval never
+        // stopped on a throwing tick). poll() may already have re-armed
+        // through wakePolling().
+        if (this.pollTimer === null) this.schedulePoll();
+      }
     }, this.pollDelayMs);
     timer.unref?.();
     this.pollTimer = timer;
