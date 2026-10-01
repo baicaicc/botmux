@@ -1556,6 +1556,91 @@ describe('HerdrBackend callbacks', () => {
     for (const w of thirdCohort) expect(w.child.killed).toBe(true);
   });
 
+  // Herdr 0.9 dropped `wait agent-status`; `agent wait --until …` replaces it (AIO-178).
+  const AGENT_WAIT_HELP = 'Usage: herdr agent wait <TARGET> [OPTIONS]\n      --until <STATUS>\n      --timeout <MS>\n';
+  class FakeAgentWait extends FakeChild {
+    readonly stdout = Object.assign(new EventEmitter(), { setEncoding: vi.fn() });
+    finish(code: number, status?: string): void {
+      if (status) this.stdout.emit('data', JSON.stringify({ result: { agent: { agent_status: status } } }));
+      this.emit('close', code, null);
+    }
+  }
+  function captureAgentWaits(): Array<{ until: string[]; child: FakeAgentWait }> {
+    const waits: Array<{ until: string[]; child: FakeAgentWait }> = [];
+    mockedSpawn.mockImplementation(((_cmd: any, args: any) => {
+      const argv = args as string[];
+      if (argv.includes('agent') && argv.includes('wait')) {
+        const child = new FakeAgentWait();
+        waits.push({ until: argv.flatMap((arg, i) => argv[i - 1] === '--until' ? [arg] : []).sort(), child });
+        return child;
+      }
+      if (argv.includes('agent-status')) throw new Error('legacy `wait agent-status` must not be used when `agent wait` exists');
+      return makeFakeChild();
+    }) as any);
+    return waits;
+  }
+
+  it('status watcher (agent wait): one child watches every other status and re-arms without the matched one', () => {
+    const waits = captureAgentWaits();
+    let paneText = 'baseline';
+    setHerdrResponses([
+      { match: a => a.includes('wait') && a.includes('--help'), reply: () => AGENT_WAIT_HELP },
+      { match: a => a[0] === 'session' && a[1] === 'list', reply: () => EXISTING_SESSION_REPLY },
+      { match: a => a.includes('agent') && a.includes('get'), reply: () => AGENT_GET_REPLY('1-1') },
+      { match: a => a.includes('agent') && a.includes('list'), reply: () => AGENT_LIST_REPLY('1-1') },
+      { match: a => a.includes('read') && (a.includes('agent') || a.includes('pane')), reply: () => PANE_READ_REPLY(paneText) },
+    ]);
+    const be = new HerdrBackend(SESSION, { isReattach: true });
+    const seen: string[] = [];
+    const statuses: string[] = [];
+    be.onData(d => seen.push(d));
+    be.onAgentStatus(status => statuses.push(status));
+    be.spawn('claude', [], { cwd: '/work', cols: 80, rows: 24, env: {} });
+
+    expect(waits.map(w => w.until)).toEqual([['blocked', 'done', 'idle', 'working']]);
+
+    paneText = 'baseline result';
+    waits[0]!.child.finish(0, 'done');
+    expect(seen).toEqual([' result']);
+    expect(statuses).toEqual(['done']);
+    expect(waits.map(w => w.until)).toEqual([
+      ['blocked', 'done', 'idle', 'working'],
+      ['blocked', 'idle', 'working'],
+    ]);
+
+    waits[1]!.child.finish(0, 'working');
+    expect(statuses).toEqual(['done', 'working']);
+    expect(waits[2]!.until).toEqual(['blocked', 'done', 'idle']);
+
+    be.kill();
+    expect(waits[2]!.child.killed).toBe(true);
+  });
+
+  it('status watcher (agent wait): a timed-out or failed wait reports no status; a vanished agent emits onExit', () => {
+    const waits = captureAgentWaits();
+    let agentGone = false;
+    setHerdrResponses([
+      { match: a => a.includes('wait') && a.includes('--help'), reply: () => AGENT_WAIT_HELP },
+      { match: a => a[0] === 'session' && a[1] === 'list', reply: () => EXISTING_SESSION_REPLY },
+      { match: a => a.includes('agent') && a.includes('get'), reply: () => AGENT_GET_REPLY('1-1') },
+      { match: a => a.includes('agent') && a.includes('list'), reply: () => agentGone ? JSON.stringify({ result: { agents: [] } }) : AGENT_LIST_REPLY('1-1') },
+      { match: a => a.includes('read') && (a.includes('agent') || a.includes('pane')), reply: () => PANE_READ_REPLY('x') },
+    ]);
+    const be = new HerdrBackend(SESSION, { isReattach: true });
+    const statuses: string[] = [];
+    const exits: Array<[number | null, string | null]> = [];
+    be.onAgentStatus(status => statuses.push(status));
+    be.onExit((code, signal) => exits.push([code, signal]));
+    be.spawn('claude', [], { cwd: '/work', cols: 80, rows: 24, env: {} });
+
+    agentGone = true;
+    waits[0]!.child.finish(1);
+    expect(statuses).toEqual([]);
+    expect(exits).toEqual([[0, null]]);
+    expect(waits).toHaveLength(1);
+    be.kill();
+  });
+
   it('status watcher: instant non-zero exit on a vanished agent emits onExit and does NOT re-arm (storm guard)', () => {
     // Regression for the re-arm storm: on herdr v0.6.6 a `herdr wait
     // agent-status` against a dead pane returns code 1 IMMEDIATELY. The old
