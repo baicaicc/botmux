@@ -33,6 +33,8 @@ export interface OnlineDaemonInfo {
   /** Birth identity recorded atomically by the daemon (raw platform format). */
   processStartIdentity?: string;
   lastHeartbeat?: number;
+  /** Bound terminal reverse-proxy port (loopback), when the daemon has one. */
+  terminalProxyPort?: number;
 }
 
 /** `dataDir` lets a caller that already resolved a data dir keep the daemon
@@ -107,6 +109,7 @@ export function listDaemonDescriptors(dataDir?: string, opts: { strict?: boolean
         ...(typeof d.processStartIdentity === 'string' && d.processStartIdentity
           ? { processStartIdentity: d.processStartIdentity } : {}),
         lastHeartbeat: d.lastHeartbeat,
+        ...(parseDaemonIpcPort(d.terminalProxyPort) ? { terminalProxyPort: d.terminalProxyPort } : {}),
       });
     } catch { /* malformed — skip */ }
   }

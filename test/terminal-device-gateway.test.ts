@@ -48,7 +48,7 @@ afterEach(async () => {
   }
 });
 
-async function fixture(options: { notifyPairing?: () => Promise<void> } = {}): Promise<Fixture> {
+async function fixture(options: { notifyPairing?: () => Promise<void>; legacyCookieNames?: RegExp } = {}): Promise<Fixture> {
   const dataDir = mkdtempSync(join(tmpdir(), 'botmux-device-gateway-'));
   const sessions = new Map([
     [SID_A, { ownerId: OWNER, writeToken: 'session-a-private-write', viewToken: 'session-a-private-view' }],
@@ -89,6 +89,7 @@ async function fixture(options: { notifyPairing?: () => Promise<void> } = {}): P
   const workerPort = (worker.address() as { port: number }).port;
   const gateway = new TerminalDeviceGateway({
     store, origin: ORIGIN, secret: () => SECRET,
+    ...(options.legacyCookieNames ? { legacyCookieNames: options.legacyCookieNames } : {}),
     session: sid => sessions.get(sid) ?? null,
     notifyPairing: async (sessionId, code, scope) => {
       notifications.push({ sessionId, code, scope });
@@ -497,5 +498,33 @@ describe('terminal device gateway with real HTTP and WebSocket proxy', () => {
     const echoed = new Promise<string>(resolve => b.ws.once('message', data => resolve(data.toString())));
     b.ws.send('still-authorized');
     expect(await echoed).toBe('echo:still-authorized');
+  });
+});
+
+describe('deployment-wide device identity (legacy per-bot cookies)', () => {
+  const LEGACY = '__Host-botmux_terminal_device_abcdef012345';
+
+  it('accepts a paired device under a legacy per-bot cookie name and clears that name on forget', async () => {
+    const f = await fixture({ legacyCookieNames: /^__Host-botmux_terminal_device_[0-9a-f]{12}$/ });
+    const pair = await paired(f);
+    const legacyCookie = `${LEGACY}=${pair.browserToken}`;
+    const { first } = await openWs(f, `unrelated=1; ${legacyCookie}`);
+    expect(first.claims.scope).toBe('read');
+    // A stale current-name cookie does not hide a valid legacy one.
+    expect((await request(f, '', `${COOKIE_NAME}=${'A'.repeat(43)}; ${legacyCookie}`)).status).toBe(200);
+    const forget = await request(f, '_device/forget', legacyCookie, SID_A, { method: 'POST', headers: { Origin: ORIGIN } });
+    expect(forget.status).toBe(200);
+    expect(forget.headers.get('set-cookie')).toBe(`${LEGACY}=; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=0`);
+    expect(f.store.identity(pair.browserToken)).toBeNull();
+    expect((await request(f, '', legacyCookie)).status).toBe(403);
+  });
+
+  it('ignores legacy cookie names unless configured, and names outside the pattern', async () => {
+    const plain = await fixture();
+    const token = (await paired(plain)).browserToken;
+    expect((await request(plain, '', `${LEGACY}=${token}`)).status).toBe(403);
+    const f = await fixture({ legacyCookieNames: /^__Host-botmux_terminal_device_[0-9a-f]{12}$/ });
+    const other = (await paired(f)).browserToken;
+    expect((await request(f, '', `__Host-other=${other}`)).status).toBe(403);
   });
 });
