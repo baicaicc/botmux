@@ -1,4 +1,3 @@
-import { isSharedOnlyBot, SHARED_LAUNCH_NOTICE } from './shared-only.js';
 import {claudeDataDirForPid} from '../services/claude-data-dir.js';
 import { handoffCardClosed, handoffCardBlocksStreaming, applyHandoffCardEvent, type HandoffCardEvent } from './handoff-card-lifecycle.js';
 import { commitTriggerStreamingCard, discardTriggerStreamingCard, hasPendingTriggerStreamingCard } from './trigger-streaming-card.js';
@@ -11350,13 +11349,6 @@ export function forkWorker(
     admissionReported = true;
     opts.onAdmission?.(admission);
   };
-  if (isSharedOnlyBot(ds.larkAppId)) {
-    // Shared sessions use forkAdoptWorker, never this fresh/resume launcher.
-    reportAdmission('rejected');
-    void callbacks?.sessionReply(sessionAnchorId(ds), SHARED_LAUNCH_NOTICE, 'text', ds.larkAppId)
-      .catch(err => logger.warn(`Failed to report shared-only launch refusal: ${err}`));
-    return false;
-  }
   const gatedPrompt = typeof promptInput === 'string' ? { content: promptInput } : promptInput;
   const remoteRetirementPhase = remoteRetirementAdmissionPhase(ds);
   if (remoteRetirementPhase) {
