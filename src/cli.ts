@@ -124,6 +124,7 @@ import {
   editInputFromFlags,
   isScriptedSetupInvocation,
   maskAppSecret,
+  maskBotEnv,
   parseSetupCommand,
   SETUP_CLI_USAGE,
   type SetupCommand,
@@ -1759,6 +1760,7 @@ function botJsonView(bot: Record<string, any>, index: number): Record<string, an
     processName: botProcessName(bot, index, PM2_NAME),
     ...bot,
     larkAppSecret: maskAppSecret(bot?.larkAppSecret),
+    ...(bot?.env === undefined ? {} : { env: maskBotEnv(bot.env) }),
   };
 }
 
