@@ -324,6 +324,29 @@ function agentRowExited(agent: any): boolean {
     || agent?.running === false;
 }
 
+let agentWaitSupported: boolean | undefined;
+
+/** Whether this Herdr has `agent wait --until` (probed once per process). */
+function supportsAgentWait(): boolean {
+  if (agentWaitSupported === undefined) {
+    try {
+      const help = execFileSync(herdrExecutable(), ['agent', 'wait', '--help'], {
+        encoding: 'utf-8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+        timeout: 3000,
+      });
+      agentWaitSupported = typeof help === 'string' && help.includes('--until');
+    } catch {
+      agentWaitSupported = false;
+    }
+  }
+  return agentWaitSupported;
+}
+
+export function __testOnly_resetHerdrAgentWaitProbe(): void {
+  agentWaitSupported = undefined;
+}
+
 /** The status an `agent wait --until …` call matched, from its JSON stdout. */
 function agentWaitStatus(stdout: string, watched: readonly WatchedStatus[]): WatchedStatus | undefined {
   try {
@@ -388,7 +411,6 @@ export class HerdrBackend implements SessionBackend {
   private pollDelayMs = POLL_INTERVAL_MS;
   private unchangedPolls = 0;
   private statusWaitProcesses: ChildProcess[] = [];
-  private agentWaitSupported: boolean | undefined;
   private readonly dataCbs: Array<(d: string) => void> = [];
   private readonly snapshotCbs: Array<(snapshot: string) => void> = [];
   private readonly webCursorCbs: Array<(cursor: HerdrWebTerminalCursor) => void> = [];
@@ -1287,6 +1309,26 @@ export class HerdrBackend implements SessionBackend {
       // immediately while a status remains current, so including it again is
       // the level-triggered success storm this state machine prevents.
       if (code === 0 && status) {
+        // A wait also resolves when the CLI dies: Herdr reports its last
+        // idle/done state, then drops the row. idle/done release queued input
+        // into the pane, which must never reach the bare shell left behind, so
+        // only announce a status for an agent that is still listed.
+        const agents = this.listAgents();
+        if (agents === null) {
+          // Unconfirmed. Waits are level-triggered, so re-arming with the
+          // previous status returns this one again for another check.
+          const t = setTimeout(() => {
+            if (!this.exited) this.startStatusWatcher(currentStatus);
+          }, POLL_INTERVAL_MS);
+          t.unref?.();
+          return;
+        }
+        const matching = agents.find(a => a?.pane_id === this.paneId || a?.name === this.agentName);
+        if (!matching || agentRowExited(matching)) {
+          const exitCode = typeof matching?.exit_code === 'number' ? matching.exit_code : 0;
+          this.handleExit(exitCode, null);
+          return;
+        }
         this.wakePolling();
         for (const cb of this.agentStatusCbs) {
           try { cb(status); } catch { /* listener crash shouldn't kill watcher */ }
@@ -1341,7 +1383,7 @@ export class HerdrBackend implements SessionBackend {
       this.statusWaitProcesses = this.statusWaitProcesses.filter(c => c !== child);
     };
 
-    if (this.supportsAgentWait()) {
+    if (supportsAgentWait()) {
       const child = spawn(herdrExecutable(), [
         '--session', this.sessionName,
         'agent', 'wait', paneTarget,
@@ -1369,23 +1411,6 @@ export class HerdrBackend implements SessionBackend {
       }
     }
     this.statusWaitProcesses = cohort;
-  }
-
-  /** Whether this Herdr has `agent wait --until` (probed once per backend). */
-  private supportsAgentWait(): boolean {
-    if (this.agentWaitSupported === undefined) {
-      try {
-        const help = execFileSync(herdrExecutable(), ['agent', 'wait', '--help'], {
-          encoding: 'utf-8',
-          stdio: ['ignore', 'pipe', 'ignore'],
-          timeout: 3000,
-        });
-        this.agentWaitSupported = typeof help === 'string' && help.includes('--until');
-      } catch {
-        this.agentWaitSupported = false;
-      }
-    }
-    return this.agentWaitSupported;
   }
 
   private stopStatusWatcher(): void {

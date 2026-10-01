@@ -38,7 +38,7 @@ vi.mock('../src/services/codebuddy-transcript.js', async importOriginal => ({
 
 import { execFileSync, spawn } from 'node:child_process';
 import * as pty from 'node-pty';
-import { HerdrBackend } from '../src/adapters/backend/herdr-backend.js';
+import { HerdrBackend, __testOnly_resetHerdrAgentWaitProbe } from '../src/adapters/backend/herdr-backend.js';
 import { codebuddySession } from '../src/services/codebuddy-transcript.js';
 
 const mockedExecFileSync = vi.mocked(execFileSync);
@@ -188,6 +188,7 @@ function setManagedLaunchResponses(kind: string, overrides: HerdrResponseHandler
 }
 
 beforeEach(() => {
+  __testOnly_resetHerdrAgentWaitProbe();
   mockedExecFileSync.mockReset();
   mockedSpawn.mockReset();
   mockedPtySpawn.mockReset();
@@ -1614,6 +1615,70 @@ describe('HerdrBackend callbacks', () => {
 
     be.kill();
     expect(waits[2]!.child.killed).toBe(true);
+  });
+
+  it('status watcher (agent wait): a wait that resolves because the CLI died reports the exit, not idle', () => {
+    // Herdr resolves the wait with the dead CLI's last idle/done state before
+    // dropping its row. Announcing idle would release queued Lark input into
+    // the bare shell left in the pane.
+    const waits = captureAgentWaits();
+    let agentGone = false;
+    setHerdrResponses([
+      { match: a => a.includes('wait') && a.includes('--help'), reply: () => AGENT_WAIT_HELP },
+      { match: a => a[0] === 'session' && a[1] === 'list', reply: () => EXISTING_SESSION_REPLY },
+      { match: a => a.includes('agent') && a.includes('get'), reply: () => AGENT_GET_REPLY('1-1') },
+      { match: a => a.includes('agent') && a.includes('list'), reply: () => agentGone ? JSON.stringify({ result: { agents: [] } }) : AGENT_LIST_REPLY('1-1') },
+      { match: a => a.includes('read') && (a.includes('agent') || a.includes('pane')), reply: () => PANE_READ_REPLY('x') },
+    ]);
+    const be = new HerdrBackend(SESSION, { isReattach: true });
+    const statuses: string[] = [];
+    const exits: Array<[number | null, string | null]> = [];
+    be.onAgentStatus(status => statuses.push(status));
+    be.onExit((code, signal) => exits.push([code, signal]));
+    be.spawn('claude', [], { cwd: '/work', cols: 80, rows: 24, env: {} });
+
+    agentGone = true;
+    waits[0]!.child.finish(0, 'idle');
+    expect(statuses).toEqual([]);
+    expect(exits).toEqual([[0, null]]);
+    expect(waits).toHaveLength(1);
+    be.kill();
+  });
+
+  it('status watcher (agent wait): an unconfirmed status is re-checked instead of announced', () => {
+    vi.useFakeTimers();
+    const waits = captureAgentWaits();
+    let listFails = true;
+    setHerdrResponses([
+      { match: a => a.includes('wait') && a.includes('--help'), reply: () => AGENT_WAIT_HELP },
+      { match: a => a[0] === 'session' && a[1] === 'list', reply: () => EXISTING_SESSION_REPLY },
+      { match: a => a.includes('agent') && a.includes('get'), reply: () => AGENT_GET_REPLY('1-1') },
+      {
+        match: a => a.includes('agent') && a.includes('list'),
+        reply: () => { if (listFails) throw new Error('busy'); return AGENT_LIST_REPLY('1-1'); },
+      },
+      { match: a => a.includes('read') && (a.includes('agent') || a.includes('pane')), reply: () => PANE_READ_REPLY('x') },
+    ]);
+    const be = new HerdrBackend(SESSION, { isReattach: true });
+    const statuses: string[] = [];
+    be.onAgentStatus(status => statuses.push(status));
+    be.spawn('claude', [], { cwd: '/work', cols: 80, rows: 24, env: {} });
+
+    waits[0]!.child.finish(0, 'idle');
+    expect(statuses).toEqual([]);
+    expect(waits).toHaveLength(1);
+
+    // The previous status is re-armed, so Herdr returns idle again for a second check.
+    listFails = false;
+    vi.advanceTimersByTime(500);
+    expect(waits.map(w => w.until)).toEqual([
+      ['blocked', 'done', 'idle', 'working'],
+      ['blocked', 'done', 'idle', 'working'],
+    ]);
+    waits[1]!.child.finish(0, 'idle');
+    expect(statuses).toEqual(['idle']);
+    expect(waits[2]!.until).toEqual(['blocked', 'done', 'working']);
+    be.kill();
   });
 
   it('status watcher (agent wait): a timed-out or failed wait reports no status; a vanished agent emits onExit', () => {
