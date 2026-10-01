@@ -416,3 +416,17 @@ export function maskAppSecret(secret: unknown): string {
   if (secret.length <= 8) return '••••';
   return `${secret.slice(0, 4)}••••${secret.slice(-4)}`;
 }
+
+/** env 变量名像密钥（KEY / TOKEN / SECRET / PASSWORD 等）才脱敏；代理地址、BASE_URL 这类保留原值。 */
+const SECRET_ENV_NAME_RE = /(KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH)/i;
+
+/** list/add/edit --json 输出前的 env 脱敏：只处理名字像密钥的条目，口径同 maskAppSecret。 */
+export function maskBotEnv(env: unknown): unknown {
+  if (!env || typeof env !== 'object' || Array.isArray(env)) return env;
+  return Object.fromEntries(
+    Object.entries(env as Record<string, unknown>).map(([name, value]) => [
+      name,
+      SECRET_ENV_NAME_RE.test(name) && typeof value === 'string' ? maskAppSecret(value) : value,
+    ]),
+  );
+}

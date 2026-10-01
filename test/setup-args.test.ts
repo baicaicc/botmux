@@ -5,6 +5,7 @@ import {
   editInputFromFlags,
   isScriptedSetupInvocation,
   maskAppSecret,
+  maskBotEnv,
   parseSetupCommand,
   SETUP_CLI_USAGE,
   cliSelectionKeys,
@@ -475,5 +476,28 @@ describe('maskAppSecret', () => {
     expect(maskAppSecret(undefined)).toBe('');
     expect(maskAppSecret('short')).toBe('••••');
     expect(maskAppSecret('abcd1234efgh5678')).toBe('abcd••••5678');
+  });
+});
+
+describe('maskBotEnv', () => {
+  it('masks secret-looking names and keeps the rest', () => {
+    expect(maskBotEnv({
+      ANTHROPIC_API_KEY: 'abcd1234efgh5678',
+      ANTHROPIC_AUTH_TOKEN: 'short',
+      ANTHROPIC_BASE_URL: 'https://example.invalid/api',
+      HTTPS_PROXY: 'http://127.0.0.1:7890',
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
+    })).toEqual({
+      ANTHROPIC_API_KEY: 'abcd••••5678',
+      ANTHROPIC_AUTH_TOKEN: '••••',
+      ANTHROPIC_BASE_URL: 'https://example.invalid/api',
+      HTTPS_PROXY: 'http://127.0.0.1:7890',
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
+    });
+  });
+
+  it('passes through non-object env untouched', () => {
+    expect(maskBotEnv(undefined)).toBeUndefined();
+    expect(maskBotEnv('x')).toBe('x');
   });
 });
