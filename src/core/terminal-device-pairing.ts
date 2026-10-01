@@ -5,11 +5,37 @@ import type { TerminalControlScope } from './terminal-control-grant.js';
 
 const stores = new Map<string, TerminalDeviceStore>();
 
+/**
+ * Deployment principal used instead of per-bot owner open_ids when
+ * BOTMUX_TERMINAL_DEVICE_SHARED=1. Lark open_ids differ per app, so a shared
+ * browser identity cannot be bound to one of them. Setting the flag declares
+ * that every bot sharing this data dir belongs to the same person: one Lark
+ * confirmation (still by that bot's real owner) pairs the browser for all
+ * bots. Session grants stay per session and still need that session's link.
+ */
+export const TERMINAL_DEVICE_SHARED_OWNER = 'botmux-deployment';
+
+export function terminalDeviceSharedAcrossBots(): boolean {
+  return process.env.BOTMUX_TERMINAL_DEVICE_SHARED === '1';
+}
+
+/** Owner key the device store compares; the real owner still approves in Lark. */
+export function terminalDeviceOwnerKey(ownerOpenId: string): string {
+  return terminalDeviceSharedAcrossBots() ? TERMINAL_DEVICE_SHARED_OWNER : ownerOpenId;
+}
+
 export function terminalDeviceStoreForBot(larkAppId: string): TerminalDeviceStore | null {
   if (process.env.BOTMUX_TERMINAL_DEVICE_PAIRING !== '1') return null;
-  const key = JSON.stringify([config.session.dataDir, larkAppId]);
+  const shared = terminalDeviceSharedAcrossBots();
+  const botId = shared ? TERMINAL_DEVICE_SHARED_OWNER : larkAppId;
+  const key = JSON.stringify([config.session.dataDir, botId]);
   let store = stores.get(key);
-  if (!store) { store = new TerminalDeviceStore({ dataDir: config.session.dataDir, botId: larkAppId }); stores.set(key, store); }
+  if (!store) {
+    store = new TerminalDeviceStore({ dataDir: config.session.dataDir, botId });
+    // Keep browsers paired under the former per-bot stores (no forced re-pair).
+    if (shared) store.importLegacyStores(TERMINAL_DEVICE_SHARED_OWNER);
+    stores.set(key, store);
+  }
   return store;
 }
 
@@ -20,7 +46,7 @@ export function approveTerminalDevice(input: { larkAppId: string; sessionId: str
   const store = terminalDeviceStoreForBot(input.larkAppId);
   if (!store) return { ok: false, message: '当前入口尚未开启设备配对。' };
   try {
-    const result = store.approve({ code: input.code, sessionId: input.sessionId, ownerId });
+    const result = store.approve({ code: input.code, sessionId: input.sessionId, ownerId: terminalDeviceOwnerKey(ownerId) });
     return result.ok
       ? { ok: true, message: '设备配对成功，浏览器会自动进入当前会话。' }
       : { ok: false, message: '配对码已过期、已使用或不属于当前会话，请重新打开原 Lark 链接。' };

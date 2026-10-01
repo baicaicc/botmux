@@ -6,7 +6,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const state = vi.hoisted(() => ({ dataDir: '', owner: 'ou_owner' as string | undefined }));
 vi.mock('../src/config.js', () => ({ config: { session: { get dataDir() { return state.dataDir; } } } }));
 vi.mock('../src/bot-registry.js', () => ({ getOwnerOpenId: () => state.owner }));
-import { approveTerminalDevice, buildTerminalDevicePairingCard, terminalDeviceStoreForBot } from '../src/core/terminal-device-pairing.js';
+import { approveTerminalDevice, buildTerminalDevicePairingCard, terminalDeviceOwnerKey, terminalDeviceStoreForBot, TERMINAL_DEVICE_SHARED_OWNER } from '../src/core/terminal-device-pairing.js';
+import { TerminalDeviceStore } from '../src/core/terminal-device-store.js';
 
 beforeEach(() => {
   state.dataDir = mkdtempSync(join(tmpdir(), 'terminal-device-pairing-'));
@@ -56,5 +57,40 @@ describe('original Lark session approval', () => {
     expect(action).toEqual({ action: 'terminal_device_approve', root_id: 'original-thread', session_id: sessionId, code: 'ABCDEFGH' });
     expect(card.elements[0].content).toContain('查看');
     expect(card.elements[0].content).not.toContain('查看和操作');
+  });
+});
+
+describe('deployment-wide identity (BOTMUX_TERMINAL_DEVICE_SHARED=1)', () => {
+  it('pairs once via one bot and the device is known to every bot; grants stay per session', () => {
+    vi.stubEnv('BOTMUX_TERMINAL_DEVICE_SHARED', '1');
+    const kimi = terminalDeviceStoreForBot('bot-kimi')!;
+    expect(terminalDeviceStoreForBot('bot-codebuddy')).toBe(kimi);
+    const ownerKey = terminalDeviceOwnerKey('ou_owner');
+    expect(ownerKey).toBe(TERMINAL_DEVICE_SHARED_OWNER);
+    const pair = kimi.startPair({ sessionId: 'kimi-session', scope: 'read', ownerId: ownerKey });
+    // Still only that bot's real owner may confirm in Lark.
+    expect(approveTerminalDevice({ larkAppId: 'bot-kimi', sessionId: 'kimi-session', code: pair.code, operatorId: 'ou_other' }).ok).toBe(false);
+    expect(approveTerminalDevice({ larkAppId: 'bot-kimi', sessionId: 'kimi-session', code: pair.code, operatorId: 'ou_owner' }).ok).toBe(true);
+    const codebuddy = terminalDeviceStoreForBot('bot-codebuddy')!;
+    expect(codebuddy.identity(pair.browserToken)).not.toBeNull();
+    expect(codebuddy.access({ browserToken: pair.browserToken, sessionId: 'cb-session', scope: 'read', ownerId: ownerKey })).toBeNull();
+    expect(codebuddy.grant({ browserToken: pair.browserToken, sessionId: 'cb-session', scope: 'read', ownerId: ownerKey })).not.toBeNull();
+    // One revoke (device settings in any bot) removes the identity everywhere.
+    expect(codebuddy.revoke(pair.browserToken)).toBe(true);
+    expect(kimi.identity(pair.browserToken)).toBeNull();
+  });
+
+  it('keeps browsers paired under the former per-bot store', () => {
+    const legacy = new TerminalDeviceStore({ dataDir: state.dataDir, botId: 'bot-codebuddy' });
+    const pair = legacy.startPair({ sessionId: 'cb-session', scope: 'write', ownerId: 'ou_owner' });
+    expect(legacy.approve({ code: pair.code, sessionId: 'cb-session', ownerId: 'ou_owner' }).ok).toBe(true);
+    vi.stubEnv('BOTMUX_TERMINAL_DEVICE_SHARED', '1');
+    const shared = terminalDeviceStoreForBot('bot-kimi')!;
+    expect(shared.identity(pair.browserToken)).not.toBeNull();
+    expect(shared.access({ browserToken: pair.browserToken, sessionId: 'cb-session', scope: 'write', ownerId: TERMINAL_DEVICE_SHARED_OWNER })).not.toBeNull();
+  });
+
+  it('keeps per-bot owner keys when sharing is off', () => {
+    expect(terminalDeviceOwnerKey('ou_owner')).toBe('ou_owner');
   });
 });

@@ -53,6 +53,12 @@ export interface TerminalProxyOptions {
   ) => boolean;
   /** Max upward port probes when `port` is taken (EADDRINUSE). Default 20; 0 disables. */
   maxProbe?: number;
+  /**
+   * Port of a sibling daemon's proxy that owns `sessionId` (undefined when this
+   * daemon owns it or nobody does). Such requests are handed over verbatim,
+   * once, before this daemon's guard, so one public port fronts every bot.
+   */
+  resolvePeerPort?: (sessionId: string) => number | undefined;
   /** Optional application guard. Runs before resolving or waking a worker. */
   authorizeRequest?: (request: TerminalProxyRequest) => Promise<TerminalProxyAuthorization>;
 }
@@ -109,6 +115,9 @@ function parseRequestLine(line: string): { method: string; target: string; versi
   if (!/^HTTP\/\d\.\d$/.test(version)) return null;
   return { method, target, version };
 }
+
+/** Marks a request already handed over by a peer proxy; it is never handed on again. */
+const PEER_HOP_HEADER = 'X-Botmux-Terminal-Peer-Hop';
 
 /** Minimal close-delimited HTTP response written straight to the client socket. */
 function writeHttpError(sock: Socket, status: number, reason: string, body: string): void {
@@ -224,6 +233,28 @@ export function startTerminalProxy(opts: TerminalProxyOptions): Promise<Terminal
       // Upgrade/Connection/Sec-WebSocket-* handshake the worker needs).
       let headerLines = headerBlock.length ? headerBlock.split('\r\n') : [];
       const isUpgrade = headerLines.some((l) => /^upgrade\s*:/i.test(l));
+
+      const handedOver = headerLines.some((l) => l.toLowerCase().startsWith(`${PEER_HOP_HEADER.toLowerCase()}:`));
+      const peerPort = handedOver ? undefined : opts.resolvePeerPort?.(parsed.sessionId);
+      if (peerPort) {
+        // Byte-for-byte hand-over; only the hop marker is added. The peer
+        // enforces its own guard and the one-request-per-connection rule.
+        const head = `${requestLine}\r\n${[...headerLines, `${PEER_HOP_HEADER}: 1`].join('\r\n')}\r\n\r\n`;
+        const peer = netConnect({ host: '127.0.0.1', port: peerPort }, () => {
+          peer.write(head);
+          if (bodyAndRest.length) peer.write(bodyAndRest);
+          peer.pipe(client);
+          client.pipe(peer);
+        });
+        peer.on('error', () => {
+          if (!client.destroyed) writeHttpError(client, 502, 'Bad Gateway', 'proxy error');
+          peer.destroy();
+        });
+        client.on('error', () => { peer.destroy(); client.destroy(); });
+        peer.on('close', () => { if (!peer.readableEnded) client.destroy(); });
+        client.on('close', () => peer.destroy());
+        return;
+      }
 
       const route = async () => {
         let rest = parsed.rest;

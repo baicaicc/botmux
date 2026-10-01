@@ -446,3 +446,42 @@ describe('terminal proxy — on-demand wake (ensureWorkerPort)', () => {
     expect(messages[1]).toBe('echo:ping');
   });
 });
+
+describe('terminal proxy — hand-over to a peer daemon proxy', () => {
+  it('hands a sibling-owned session to the peer proxy once, with the request intact', async () => {
+    const workerPort = await startFakeWorker();
+    const seen: string[] = [];
+    const peer = await startTerminalProxy({
+      port: 0, host: '127.0.0.1', resolvePort: () => workerPort,
+      // A misconfigured peer pointing back must not loop.
+      resolvePeerPort: () => proxy!.port,
+      authorizeRequest: async request => {
+        seen.push(`${request.method} ${request.rest} ${request.headers.filter(h => /^(cookie|x-botmux-terminal-peer-hop)/i.test(h)).join('|')}`);
+        return { kind: 'forward', rest: request.rest, headers: request.headers };
+      },
+    });
+    try {
+      proxy = await startTerminalProxy({
+        port: 0, host: '127.0.0.1', resolvePort: () => undefined,
+        resolvePeerPort: sid => (sid === 'peer-session' ? peer.port : undefined),
+        authorizeRequest: async () => ({ kind: 'response', status: 403, headers: {}, body: 'front guard' }),
+      });
+      const res = await fetch(`http://127.0.0.1:${proxy.port}/s/peer-session/?viewToken=v`, { headers: { Cookie: 'a=b' } });
+      expect(res.status).toBe(200);
+      expect(await res.text()).toBe('worker-saw:/?viewToken=v');
+      expect(seen).toEqual(['GET /?viewToken=v Cookie: a=b|X-Botmux-Terminal-Peer-Hop: 1']);
+      // Own sessions still go through the local guard.
+      expect((await fetch(`http://127.0.0.1:${proxy.port}/s/own-session/`)).status).toBe(403);
+
+      const ws = new WebSocket(`ws://127.0.0.1:${proxy.port}/s/peer-session/?access=read`);
+      const hello = await new Promise<string>((resolve, reject) => {
+        ws.once('message', data => resolve(data.toString()));
+        ws.once('error', reject);
+      });
+      expect(hello).toBe('hello-path:/?access=read');
+      ws.close();
+    } finally {
+      await peer.close();
+    }
+  });
+});

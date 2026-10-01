@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -276,5 +276,52 @@ describe('single-session terminal browser pairing', () => {
     const restarted = new TerminalDeviceStore({ dataDir, botId, now: () => now });
     expect(restarted.identity(pending.browserToken)).toBeNull();
     expect(restarted.access(input(pending.browserToken, 'write'))).toBeNull();
+  });
+});
+
+describe('deployment-wide store: legacy import and cross-process lock', () => {
+  const shared = 'botmux-deployment';
+
+  it('imports per-bot devices and grants once, keeping ids and fixed lifetimes, and keeps the old file as backup', () => {
+    const token = pair('write');
+    const legacy = JSON.parse(readFileSync(filePath(), 'utf8'));
+    now += 1_000;
+    const target = new TerminalDeviceStore({ dataDir, botId: shared, now: () => now });
+    expect(target.importLegacyStores(shared)).toBe(1);
+    const state = JSON.parse(readFileSync(filePath(shared), 'utf8'));
+    expect(state.devices).toEqual(legacy.devices.map((d: object) => ({ ...d, ownerId: shared })));
+    expect(state.grants).toEqual(legacy.grants.map((g: object) => ({ ...g, ownerId: shared })));
+    expect(state.pending).toEqual([]);
+    expect(readdirSync(join(dataDir, 'terminal-devices')).sort())
+      .toEqual([`${createHash('sha256').update(botId).digest('hex')}.json.migrated`, `${createHash('sha256').update(shared).digest('hex')}.json`].sort());
+    expect(target.identity(token)?.deviceId).toBe(legacy.devices[0].deviceId);
+    expect(target.identity(token)?.expiresAt).toBe(legacy.devices[0].expiresAt);
+    expect(target.access(input(token, 'write', sessionId, shared))).not.toBeNull();
+    expect(target.access(input(token, 'write', 'session-b', shared))).toBeNull();
+    // Idempotent once the shared store exists.
+    expect(target.importLegacyStores(shared)).toBe(0);
+  });
+
+  it('leaves unreadable or misnamed legacy files untouched', () => {
+    const dir = join(dataDir, 'terminal-devices');
+    pair();
+    writeFileSync(join(dir, 'corrupt.json'), '{');
+    const target = new TerminalDeviceStore({ dataDir, botId: shared, now: () => now });
+    expect(target.importLegacyStores(shared)).toBe(1);
+    expect(readdirSync(dir)).toContain('corrupt.json');
+  });
+
+  it('waits for a held lock, fails closed after the wait, and clears a stale lock', () => {
+    const token = pair();
+    const lock = `${filePath()}.lock`;
+    writeFileSync(lock, '');
+    const started = Date.now();
+    expect(() => store.revoke(token)).toThrow(TerminalDeviceStoreError);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(2_500);
+    expect(store.identity(token)).not.toBeNull();
+    const old = new Date(Date.now() - 60_000);
+    utimesSync(lock, old, old);
+    expect(store.revoke(token)).toBe(true);
+    expect(readdirSync(join(dataDir, 'terminal-devices')).some(name => name.endsWith('.lock'))).toBe(false);
   });
 });
