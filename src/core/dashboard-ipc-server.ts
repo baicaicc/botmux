@@ -2787,7 +2787,7 @@ function findOwnedSessionRecord(sessionId: string): Session | undefined {
  *
  *  Legacy `action`/`async` fields are still populated so existing webhook
  *  consumers keep working; new callers branch on `state`. */
-function buildAsyncTriggerLookupResponse(sessionId: string, triggerId?: string): TriggerResponse {
+export function buildAsyncTriggerLookupResponse(sessionId: string, triggerId?: string): TriggerResponse {
   const ds = findActiveBySessionId(sessionId);
   const storedRaw = ds?.session ?? sessionStore.getSession(sessionId);
   const persistedRaw = asyncTriggerStore.lookup(sessionId, triggerId);

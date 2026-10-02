@@ -179,7 +179,7 @@ vi.mock('@larksuiteoapi/node-sdk', () => {
 // ─── Imports (must be after mocks) ──────────────────────────────────────────
 
 import { __resetAnchorQueues } from '../src/utils/anchor-serializer.js';
-import { __pollMessageListenersOnceForTest, __resetEventClaimsForTest, __resetChatStatsForTest, canOperate, canTalk, decideRouting, ensureBotOpenId, isBotMentioned, maybeApplyForceTopicOverride, mentionsAnotherMember, markForwardFollowupsSessionsReady, rawMessageIngressAnchor, startLarkEventDispatcher, writeBotInfoFile, type EventHandlers } from '../src/im/lark/event-dispatcher.js';
+import { LARK_TASK_UPDATE_EVENT, __pollMessageListenersOnceForTest, __resetEventClaimsForTest, __resetChatStatsForTest, canOperate, canTalk, decideRouting, ensureBotOpenId, isBotMentioned, maybeApplyForceTopicOverride, mentionsAnotherMember, markForwardFollowupsSessionsReady, rawMessageIngressAnchor, startLarkEventDispatcher, writeBotInfoFile, type EventHandlers } from '../src/im/lark/event-dispatcher.js';
 import {
   VC_BOT_MEETING_ACTIVITY_EVENT,
   VC_BOT_MEETING_ENDED_EVENT,
@@ -1068,6 +1068,40 @@ describe('startLarkEventDispatcher — connection wiring', () => {
     expect(client.start).toHaveBeenCalledWith({ eventDispatcher: expect.any(Lark.EventDispatcher) });
     expect(capturedHandlers['im.message.receive_v1']).toBeTypeOf('function');
     expect(capturedHandlers['card.action.trigger']).toBeTypeOf('function');
+  });
+});
+
+describe('startLarkEventDispatcher — Lark task events', () => {
+  beforeEach(() => {
+    capturedHandlers = {};
+    __resetEventClaimsForTest();
+  });
+
+  it('forwards the task guid and event types once per event id', async () => {
+    const handleTaskEvent = vi.fn(async () => {});
+    startLarkEventDispatcher(MY_APP_ID, 'secret', { ...makeHandlers(), handleTaskEvent });
+
+    const event = {
+      event_id: 'evt_task_1',
+      task_guid: 'guid-1',
+      event_types: ['task_create', 'task_assignees_update'],
+    };
+    capturedHandlers[LARK_TASK_UPDATE_EVENT]?.(event);
+    capturedHandlers[LARK_TASK_UPDATE_EVENT]?.(event);
+    await flushEventWork();
+
+    expect(handleTaskEvent).toHaveBeenCalledTimes(1);
+    expect(handleTaskEvent).toHaveBeenCalledWith({
+      larkAppId: MY_APP_ID,
+      taskGuid: 'guid-1',
+      eventTypes: ['task_create', 'task_assignees_update'],
+    });
+  });
+
+  it('is a no-op for a bot without a task handler', async () => {
+    startLarkEventDispatcher(MY_APP_ID, 'secret', makeHandlers());
+    expect(() => capturedHandlers[LARK_TASK_UPDATE_EVENT]?.({ event_id: 'evt_task_2', task_guid: 'guid-2' })).not.toThrow();
+    await flushEventWork();
   });
 });
 

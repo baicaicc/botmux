@@ -2889,6 +2889,9 @@ export interface EventHandlers {
   handleDocComment?: (ctx: DocCommentContext) => Promise<boolean>;
   /** VC bot meeting push events (`vc.bot.meeting_*_v1`). ACK-safe; daemon owns meeting session state. */
   handleVcMeetingPush?: (ctx: VcMeetingPushContext) => Promise<void>;
+  /** Lark 任务入口（`task.task.update_user_access_v2`）：Bot 作为任务智能体被指派任务、
+   *  或任务下有新评论。事件只带任务 guid，daemon 侧自己回读任务内容。 */
+  handleTaskEvent?: (event: LarkTaskEvent) => Promise<void>;
   /** Best-effort hook before a human inbound turn reaches the CLI session. Used
    *  by VC meeting listener groups to catch up pending meeting context before a
    *  user asks the selected agent a follow-up question. */
@@ -3458,6 +3461,26 @@ function handleVcMeetingPushEventAckSafe(
     }
     await handlers.handleVcMeetingPush(parsed);
   }, `vc-meeting ${kind} event`);
+}
+
+export const LARK_TASK_UPDATE_EVENT = 'task.task.update_user_access_v2';
+
+export interface LarkTaskEvent {
+  larkAppId: string;
+  taskGuid: string;
+  /** e.g. `task_create`, `task_assignees_update`, `task_comment_create`. */
+  eventTypes: string[];
+}
+
+function handleTaskEventAckSafe(data: any, larkAppId: string, handlers: EventHandlers): void {
+  const taskGuid: unknown = data?.task_guid ?? data?.event?.task_guid;
+  const rawTypes: unknown = data?.event_types ?? data?.event?.event_types;
+  if (typeof taskGuid !== 'string' || !taskGuid || !handlers.handleTaskEvent) return;
+  const eventTypes = Array.isArray(rawTypes) ? rawTypes.filter((t): t is string => typeof t === 'string') : [];
+  const eventKey = `${LARK_TASK_UPDATE_EVENT}:${larkAppId}:${eventIdForKey(data) ?? unkeyableEventKey()}`;
+  scheduleAckSafeEvent(eventKey, async () => {
+    await handlers.handleTaskEvent!({ larkAppId, taskGuid, eventTypes });
+  }, 'task event');
 }
 
 /**
@@ -5194,6 +5217,7 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
       handleVcMeetingPushEventAckSafe(data, larkAppId, handlers, 'meeting_ended', VC_BOT_MEETING_ENDED_EVENT),
     [VC_PARTICIPANT_MEETING_JOINED_EVENT]: (data: any) =>
       handleVcMeetingPushEventAckSafe(data, larkAppId, handlers, 'participant_meeting_joined', VC_PARTICIPANT_MEETING_JOINED_EVENT),
+    [LARK_TASK_UPDATE_EVENT]: (data: any) => handleTaskEventAckSafe(data, larkAppId, handlers),
     'card.action.trigger': (data: any) => handleCardActionAckSafe(data, larkAppId, handlers),
     // 表情回复事件——一旦在开发者后台订阅了 reaction，SDK 每收到一次都会因
     // 没有 handler 打 "no im.message.reaction.created_v1 handle" 警告刷屏。

@@ -2156,6 +2156,15 @@ export interface BotConfig {
    */
   autoStartOnGroupJoin?: boolean;
   /**
+   * Lark 任务入口。When true, the bot registers itself as a Lark task agent: a
+   * task assigned to it starts a virtual session, the final output is posted
+   * back as a task comment, and comments on the task continue that session.
+   * Default (undefined) = off. Requires the bot scopes `task:task:read/write`
+   * and `task:comment:read/write`, plus the `task.task.update_user_access_v2`
+   * event subscribed for the app.
+   */
+  taskAgent?: boolean;
+  /**
    * 主动开工 — 场景① optional pre-configured first-turn prompt. When set, it
    * becomes the user_message of the auto-started session; when unset/blank the
    * session starts with an empty user_message and the bot reads the group
@@ -4003,6 +4012,7 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
       // 平台团队展示默认 ON：只有显式 false 有意义/落盘（undefined = 展示）。
       showInTeam: entry.showInTeam === false ? false : undefined,
       autoStartOnGroupJoin: entry.autoStartOnGroupJoin === true || undefined,
+      taskAgent: entry.taskAgent === true || undefined,
       // Default ON: only an explicit false is meaningful/persisted (undefined = on).
       autoInviteOwnerOnGroupAdd: entry.autoInviteOwnerOnGroupAdd === false ? false : undefined,
       // Preserve the configured prompt verbatim; trim-to-undefined when blank
