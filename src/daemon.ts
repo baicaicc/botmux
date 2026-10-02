@@ -466,6 +466,7 @@ import {
   snapshotAllFinalOutputDeliveries,
 } from './core/final-output-delivery-drain.js';
 import { AbortDeadlineError, hasExactSafeJsonKeys, ipcRoute, isTrustedHostIpcRequest, JsonBodyTooLargeError, jsonRes, readJsonBody, runWithAbortDeadline, setBotName, setLarkAppId, setDecisionBoardService, startIpcServer, setBotRenamer, setBotAvatarChanger, setBotDescriptionManager, armCoreOnlyReadinessGate, setCoreOnlyReady, setSupervisorShutdownHandler, setCrossPrincipalInterruptionDisableHandler, setDurableSessionLifecycleHandler, setDurableSessionListHandler, setDurableSessionSendHandler, type DurableSessionSendRequest, type DurableSessionSendResult } from './core/dashboard-ipc-server.js';
+import { buildAsyncTriggerLookupResponse } from './core/dashboard-ipc-server.js';
 import { setDeviceIsolationDaemonIdentity } from './core/device-isolation-daemon.js';
 import { currentDeviceIsolationFreezeLease } from './core/device-isolation-activation.js';
 import { reconcileContainmentHandlesOnBoot } from './core/mojo-containment.js';
@@ -566,6 +567,7 @@ import { computeInputHash } from './utils/canonical-input-hash.js';
 import { authorizeDelegatedScheduleRun, authorizeScheduleSelfManage } from './core/schedule-delegated-runtime.js';
 import { parseScheduledTurnId, trustedCallerForScheduledTask } from './core/scheduled-turn-provenance.js';
 import { TRIGGER_USER_AUTH_TOOLS } from './services/trigger-user-auth.js';
+import { getLarkTaskAgent, startLarkTaskAgent } from './services/lark-task-agent/index.js';
 import { triggerSessionTurn, reconcileIdempotencyLeasesOnBoot, convergeIdempotentAsyncTurnOnWorkerExit, externalEventOpensOwnTopic } from './core/trigger-session.js';
 import {
   runIdempotencyFailClose,
@@ -31801,6 +31803,9 @@ export async function startDaemon(botIndex?: number): Promise<void> {
         ctx.larkAppId,
         () => handleVcMeetingPush(ctx),
       ),
+      handleTaskEvent: cfg.taskAgent
+        ? (event) => getLarkTaskAgent(event.larkAppId)?.handleEvent(event) ?? Promise.resolve()
+        : undefined,
       beforeSessionTurn: (data, ctx) => maybeCatchUpVcMeetingConsumerBeforeTurn(data, ctx),
       isSessionOwner: (anchor, appId) => activeSessions.has(sessionKey(anchor, appId)),
       resolveDurableSession: (ctx) => activeSessions.get(sessionKey(
@@ -32339,6 +32344,16 @@ export async function startDaemon(botIndex?: number): Promise<void> {
     });
   } else {
     useOrdinaryOutputDelivery();
+  // Lark 任务入口：sessions are restored and the dispatcher is live, so a task
+  // agent can register and settle turns a restart left pending.
+  for (const bot of getAllBots()) {
+    const appId = bot.config.larkAppId;
+    if (!bot.config.taskAgent || bot.config.apiOnly) continue;
+    startLarkTaskAgent(appId, {
+      trigger: (req) => triggerSessionTurn(req, { larkAppId: appId, activeSessions }),
+      lookup: (sessionId, triggerId) => buildAsyncTriggerLookupResponse(sessionId, triggerId),
+      canOperate: (openId) => canOperate(appId, undefined, openId),
+    });
   }
   xpiSessionStoreBusyNoticeReadyApps.add(cfg.larkAppId);
   // The restore preflight only records structured diagnostics. Human-readable

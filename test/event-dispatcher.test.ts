@@ -243,6 +243,7 @@ vi.mock('@larksuiteoapi/node-sdk', () => {
 
 import { __resetAnchorQueues } from '../src/utils/anchor-serializer.js';
 import { __pollMessageListenersOnceForTest, __recoverDurablePrimaryIngressOnceForTest, __resetMessageListenerPollCursorForTest, __resetEventClaimsForTest, __resetChatStatsForTest, canOperate, canTalk, createLarkEventDispatcherRuntime, decideRouting, ensureBotOpenId, getGroupStats, isBotMentioned, maybeApplyForceTopicOverride, mentionsAnotherMember, markForwardFollowupsSessionsReady, rawMessageIngressAnchor, startLarkEventDispatcher, writeBotInfoFile, type EventHandlers } from '../src/im/lark/event-dispatcher.js';
+  LARK_TASK_UPDATE_EVENT,
 import {
   VC_BOT_MEETING_ACTIVITY_EVENT,
   VC_BOT_MEETING_ENDED_EVENT,
@@ -2979,6 +2980,37 @@ describe('Lark event dispatcher — durable primary processor', () => {
     });
     expect(handlers.handleNewTopic).toHaveBeenCalledOnce();
     runtime.close();
+describe('startLarkEventDispatcher — Lark task events', () => {
+  beforeEach(() => {
+    capturedHandlers = {};
+    __resetEventClaimsForTest();
+  });
+
+  it('forwards the task guid and event types once per event id', async () => {
+    const handleTaskEvent = vi.fn(async () => {});
+    startLarkEventDispatcher(MY_APP_ID, 'secret', { ...makeHandlers(), handleTaskEvent });
+
+    const event = {
+      event_id: 'evt_task_1',
+      task_guid: 'guid-1',
+      event_types: ['task_create', 'task_assignees_update'],
+    };
+    capturedHandlers[LARK_TASK_UPDATE_EVENT]?.(event);
+    capturedHandlers[LARK_TASK_UPDATE_EVENT]?.(event);
+    await flushEventWork();
+
+    expect(handleTaskEvent).toHaveBeenCalledTimes(1);
+    expect(handleTaskEvent).toHaveBeenCalledWith({
+      larkAppId: MY_APP_ID,
+      taskGuid: 'guid-1',
+      eventTypes: ['task_create', 'task_assignees_update'],
+    });
+  });
+
+  it('is a no-op for a bot without a task handler', async () => {
+    startLarkEventDispatcher(MY_APP_ID, 'secret', makeHandlers());
+    expect(() => capturedHandlers[LARK_TASK_UPDATE_EVENT]?.({ event_id: 'evt_task_2', task_guid: 'guid-2' })).not.toThrow();
+    await flushEventWork();
   });
 });
 
