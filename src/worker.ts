@@ -2401,6 +2401,9 @@ function supportsPostSubmitRenameSessionTitle(cliId: string | undefined): boolea
   return cliId === 'traex';
 }
 let isPromptReady = false;
+/** Prompt-ready edges published by markPromptReady(). A backend compares it with
+ *  its spawn-time value to tell whether its CLI has shown a confirmed prompt yet. */
+let promptReadyEdges = 0;
 /** Mutex for async flushPending — prevents concurrent flush loops. */
 let isFlushing = false;
 /** An init prompt exists but spawn/RPC policy has not yet established whether
@@ -11760,6 +11763,7 @@ function markPromptReady(): void {
   // terminal receipt so an early screen-idle heuristic cannot release it.
   if (!durableTurnInFlight) releaseActiveTurnAuthority('prompt_ready');
   isPromptReady = true;
+  promptReadyEdges++;
   settleSessionRenameOnPrompt();
   // An old backend can still report idle while its async teardown is running.
   // Only a prompt observed after the general restart fence drops may release
@@ -18247,9 +18251,18 @@ async function spawnCli(
     onPtyData(data);
   });
   if (observedBackend instanceof HerdrBackend) {
+    const promptReadyEdgesAtSpawn = promptReadyEdges;
     observedBackend.onAgentStatus((status) => {
       if (backend !== observedBackend) return;
       if (status === 'idle' || status === 'done') {
+        // Herdr status only speeds up turn boundaries; it is never this CLI's
+        // first readiness signal. Herdr can report idle while a CLI is still
+        // booting, and adapters without a startup guard (Kimi, CodeBuddy) would
+        // then type the first prompt into a half-started TUI.
+        if (promptReadyEdges === promptReadyEdgesAtSpawn) {
+          log(`Herdr agent ${status} before this CLI's first confirmed prompt — leaving startup readiness to screen evidence`);
+          return;
+        }
         log(`Herdr agent ${status} — draining bridges before marking prompt ready`);
         drainBridgesThenMarkReady('structured');
       } else if (status === 'working') {
