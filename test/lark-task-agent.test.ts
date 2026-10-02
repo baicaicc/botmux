@@ -269,6 +269,28 @@ describe('LarkTaskAgent', () => {
     expect(h.store.listPending()).toEqual([]);
   });
 
+  it('does not let a turn whose result was lost block later replies', async () => {
+    const h = harness();
+    await h.agent.handleEvent(assigned);
+    h.results.set('trg-1', { ok: true, state: 'completed', output: { content: '第一版' } });
+    await h.agent.pollOnce();
+
+    h.api.userComment('c-1', '第一次追问');
+    await h.agent.handleEvent(commented);
+    h.api.userComment('c-2', '第二次追问');
+    await h.agent.handleEvent(commented);
+    expect(h.store.get(GUID)?.pending.map(p => p.triggerId)).toEqual(['trg-2', 'trg-3']);
+
+    // trg-2 never reports; trg-3 completes.
+    h.results.set('trg-3', { ok: true, state: 'completed', output: { content: '第二次的回答' } });
+    await h.agent.pollOnce();
+    const replies = h.api.botComments();
+    expect(replies.at(-2)).toContain('没有取回');
+    expect(replies.at(-1)).toBe('第二次的回答');
+    expect(h.api.statuses.at(-1)).toEqual({ status: 4, progress: '执行完成' });
+    expect(h.store.listPending()).toEqual([]);
+  });
+
   it('settles a turn left pending by a restart', async () => {
     const file = join(dir, 'restart.json');
     const first = harness(file);
