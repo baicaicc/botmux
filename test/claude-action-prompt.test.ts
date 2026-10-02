@@ -61,6 +61,50 @@ it('projects the three-choice variant (don\'t ask again) with a plain title', ()
   expect(prompt).not.toContain('ls -la');
 });
 
+it('falls back to a generic title when the dialog body pushed it out of reach', () => {
+  // An 18-line command body pushes the title 24 lines above the question,
+  // beyond the 15-line scan window — the dialog must still notify.
+  const longCommand = Array.from({length: 18}, (_, i) => ` │ ffmpeg -ss 00:0${i}:00 -i /tmp/example/input.mp4 -frames:v 1 frames/${i}.png`);
+  const prompt = claudeActionPrompt([
+    '──────────────────────────────────────',
+    ' Bash command · from the fork agent',
+    ' Extract end-of-beat frames into a contact sheet',
+    '╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌',
+    ...longCommand,
+    '╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌',
+    ' │ Dangerous rm operation on statically-unresolvable target: /tmp/example/frames/*',
+    '',
+    ' Do you want to proceed?',
+    ' ❯ 1. Yes',
+    '   2. No',
+    '',
+    ' Esc to cancel · Tab to amend',
+  ].join('\n'));
+  expect(prompt).toContain('「权限确认」');
+  expect(prompt).toContain('Do you want to proceed?');
+  expect(prompt).not.toContain('ffmpeg');
+  expect(prompt).not.toContain('Bash command · from the fork agent');
+});
+
+it('falls back to a generic title for a tool title outside the known list', () => {
+  const prompt = claudeActionPrompt([
+    '──────────────────────────────────────',
+    ' NotebookEdit file',
+    '╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌',
+    ' │ jupyter nbconvert --to notebook /tmp/example/nb.ipynb',
+    '╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌',
+    '',
+    ' Do you want to proceed?',
+    ' ❯ 1. Yes',
+    '   2. No',
+    '',
+    ' Esc to cancel',
+  ].join('\n'));
+  expect(prompt).toContain('「权限确认」');
+  expect(prompt).not.toContain('nbconvert');
+  expect(prompt).not.toContain('NotebookEdit file');
+});
+
 it('ignores chat text quoting a dialog: no footer hint means no dialog', () => {
   // Quoted title + question + choices, but conversation output never carries
   // the interactive footer — the deciding evidence.

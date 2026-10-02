@@ -33,14 +33,18 @@ export function claudeActionPrompt(screen: string): string | undefined {
   if (choices.length < 2 || choices[0][1] !== '1' || choices[1][1] !== '2') return;
   // Scan upward from the question: the dialog title (e.g. "Bash command",
   // optionally with a " · …" suffix such as provenance from a fork agent).
-  let title: string | undefined;
+  // A long command body can push the title out of this window, and new tools
+  // bring unknown titles — the question+choices+footer triple above is
+  // already strict, so fall back to a generic title instead of dropping the
+  // dialog (a less specific notification beats a silent stall).
+  let titleLine: string | undefined;
   for (let i = questionIndex - 1; i >= Math.max(0, questionIndex - 15); i--) {
     if (TITLES.some(item => lines[i] === item || lines[i].startsWith(item + ' ·'))) {
-      title = lines[i];
+      titleLine = lines[i];
       break;
     }
   }
-  if (!title) return;
+  const title = (titleLine ?? '权限确认').slice(0, 80);
   const question = lines[questionIndex].slice(0, 180);
-  return `Claude 正等待你确认「${title.slice(0, 80)}」：${question}\n${choices.slice(0, 4).map(match => `${match[1]}. ${match[2]}`).join('\n')}\n请在原终端核对具体操作后选择。`;
+  return `Claude 正等待你确认「${title}」：${question}\n${choices.slice(0, 4).map(match => `${match[1]}. ${match[2]}`).join('\n')}\n请在原终端核对具体操作后选择。`;
 }
