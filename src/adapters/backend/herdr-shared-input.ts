@@ -6,6 +6,7 @@ import {claudeDataDirForPid} from '../../services/claude-data-dir.js';
 import {codebuddySession,codebuddyTranscript,drainCodeBuddyTranscript} from '../../services/codebuddy-transcript.js';
 import {codebuddyActionPrompt} from '../../services/codebuddy-action-prompt.js';
 import xterm from '@xterm/headless';
+import { herdrExecutable } from '../../utils/herdr-executable.js';
 
 /** A short-lived controller for one externally owned HERDR submission.
  * Acquiring ownership never uses takeover. The source terminal/Agent is never
@@ -21,7 +22,7 @@ export class HerdrSharedInput {
   private codex=false;
   constructor(private session: string,private pane: string) {}
   private inspect(): string {
-    const call=(args:string[])=>JSON.parse(execFileSync('herdr',['--session',this.session,...args],{encoding:'utf8',timeout:5000,stdio:['ignore','pipe','pipe']}));
+    const call=(args:string[])=>JSON.parse(execFileSync(herdrExecutable(),['--session',this.session,...args],{encoding:'utf8',timeout:5000,stdio:['ignore','pipe','pipe']}));
     const pane=call(['pane','get',this.pane]).result?.pane;
     const info=call(['pane','process-info','--pane',this.pane]).result?.process_info;
     const processes=info?.foreground_processes?.map((p:any)=>({...p,argv:Array.isArray(p.argv)?p.argv:[p.argv0]})).filter((p:any)=>Array.isArray(p.argv) && p.argv.some((arg:unknown)=>typeof arg==='string' && ['claude','codex','codebuddy'].includes(basename(arg))));
@@ -44,7 +45,7 @@ export class HerdrSharedInput {
     if(!this.codebuddyPid)return new Error(message);
     try {
       this.verify();
-      screen ??= execFileSync('herdr',['--session',this.session,'pane','read',this.pane,'--source','visible','--format','text'],{encoding:'utf8',timeout:5000,stdio:['ignore','pipe','pipe']});
+      screen ??= execFileSync(herdrExecutable(),['--session',this.session,'pane','read',this.pane,'--source','visible','--format','text'],{encoding:'utf8',timeout:5000,stdio:['ignore','pipe','pipe']});
       this.verify();
       const prompt=codebuddyActionPrompt(screen);
       if(prompt)return new Error(`${message}\n${prompt}`);
@@ -61,7 +62,7 @@ export class HerdrSharedInput {
       if(file) {const events=drainCodeBuddyTranscript(file,0).events;
         if(events.length && events.at(-1)?.kind!=='assistant_final')throw new Error('CodeBuddy 当前轮次尚未确认结束；消息保留，未发送。');}
     }
-    const child=spawn('herdr',['--session',this.session,'terminal','session','control',this.terminalId,'--cols','120','--rows','40'],{stdio:['pipe','pipe','pipe']});
+    const child=spawn(herdrExecutable(),['--session',this.session,'terminal','session','control',this.terminalId,'--cols','120','--rows','40'],{stdio:['pipe','pipe','pipe']});
     this.child=child;this.alive=true;
     child.stderr.resume();
     child.stdin.on('error',()=>{this.alive=false;});

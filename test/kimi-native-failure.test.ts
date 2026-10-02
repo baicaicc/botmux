@@ -3,6 +3,8 @@ import {appendFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSy
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 
+// Command assertions use the bare name whether or not this host has herdr on PATH.
+vi.mock('../src/utils/herdr-executable.js', () => ({ herdrExecutable: () => 'herdr' }));
 vi.mock('node:child_process', async original => ({
   ...await original<typeof import('node:child_process')>(), execFileSync: vi.fn(),
 }));

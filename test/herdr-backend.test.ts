@@ -20,6 +20,8 @@ import { existsSync, readFileSync, statSync } from 'node:fs';
 import { basename, dirname } from 'node:path';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
+// Command assertions use the bare name whether or not this host has herdr on PATH.
+vi.mock('../src/utils/herdr-executable.js', () => ({ herdrExecutable: () => 'herdr' }));
 vi.mock('node:child_process', () => ({
   execFileSync: vi.fn(),
   spawn: vi.fn(),
