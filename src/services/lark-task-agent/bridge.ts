@@ -34,6 +34,22 @@ const COMMENT_CHUNK_CHARS = 2800;
 const DEFAULT_POLL_INTERVAL_MS = 5_000;
 const MAX_DELIVERY_ATTEMPTS = 5;
 const MAX_TURN_AGE_MS = 12 * 60 * 60 * 1000;
+/** The first `register_agent` call for an app has been seen to answer 500
+ *  (code 2200) and then succeed moments later. */
+const REGISTER_ATTEMPTS = 3;
+const REGISTER_RETRY_MS = 5_000;
+
+interface TurnOutcome {
+  text: string;
+  status: 3 | 4;
+  progress: string;
+}
+
+const LOST_TURN_OUTCOME: TurnOutcome = {
+  text: '上一轮的结果没有取回。需要的话可以在任务下评论让我重做那一步。',
+  status: AGENT_TASK_STATUS.waitingForHuman,
+  progress: '结果未取回',
+};
 
 export interface TaskAgentDeps {
   larkAppId: string;
@@ -45,6 +61,7 @@ export interface TaskAgentDeps {
   canOperate: (openId: string) => boolean;
   now?: () => number;
   pollIntervalMs?: number;
+  sleep?: (ms: number) => Promise<void>;
 }
 
 export interface TaskEvent {
@@ -112,16 +129,25 @@ export class LarkTaskAgent {
 
   /** Register the bot as a task agent and resume turns left pending by a restart. */
   async start(): Promise<void> {
-    try {
-      await this.deps.api.register();
-      logger.info(`[task-agent] ${this.deps.larkAppId} registered as Lark task agent`);
-    } catch (err) {
-      logger.warn(
-        `[task-agent] ${this.deps.larkAppId} registration failed: ${err}. `
-        + `需要机器人权限 task:task:read/write、task:comment:read/write，并订阅事件 task.task.update_user_access_v2。`,
-      );
-    }
     this.ensurePolling();
+    const sleep = this.deps.sleep ?? ((ms: number) => new Promise<void>(resolve => { setTimeout(resolve, ms).unref?.(); }));
+    for (let attempt = 1; attempt <= REGISTER_ATTEMPTS; attempt++) {
+      try {
+        await this.deps.api.register();
+        logger.info(`[task-agent] ${this.deps.larkAppId} registered as Lark task agent`);
+        return;
+      } catch (err) {
+        if (attempt < REGISTER_ATTEMPTS) {
+          logger.info(`[task-agent] ${this.deps.larkAppId} registration attempt ${attempt} failed (${err}); retrying`);
+          await sleep(REGISTER_RETRY_MS * attempt);
+          continue;
+        }
+        logger.warn(
+          `[task-agent] ${this.deps.larkAppId} registration failed: ${err}. `
+          + `需要机器人权限 task:task:read/write、task:comment:read/write，并订阅事件 task.task.update_user_access_v2。`,
+        );
+      }
+    }
   }
 
   stop(): void {
@@ -304,9 +330,12 @@ export class LarkTaskAgent {
   private async settleTask(taskGuid: string): Promise<void> {
     // Turns of one task run serially in its session, so results arrive in order.
     for (;;) {
-      const turn = this.deps.store.get(taskGuid)?.pending[0];
+      const pending = this.deps.store.get(taskGuid)?.pending ?? [];
+      const turn = pending[0];
       if (!turn) return;
-      const outcome = this.readOutcome(turn);
+      // A later turn finishing first means this one's result was never captured.
+      const overtaken = pending.slice(1).some(later => this.readOutcome(later) !== undefined);
+      const outcome = this.readOutcome(turn) ?? (overtaken ? LOST_TURN_OUTCOME : undefined);
       if (!outcome) return;
 
       const attemptKey = `${taskGuid}:${turn.triggerId}`;
@@ -333,7 +362,7 @@ export class LarkTaskAgent {
     }
   }
 
-  private readOutcome(turn: PendingTaskTurn): { text: string; status: 3 | 4; progress: string } | undefined {
+  private readOutcome(turn: PendingTaskTurn): TurnOutcome | undefined {
     const res = this.deps.lookup(turn.sessionId, turn.triggerId);
     if (res.state === 'completed') {
       const text = (res.output?.content ?? '').trim();

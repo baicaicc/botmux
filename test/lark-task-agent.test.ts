@@ -31,10 +31,17 @@ class FakeApi implements LarkTaskApi {
   comments: LarkTaskComment[] = [];
   statuses: Array<{ status: number; progress: string }> = [];
   registered = 0;
+  failRegistrations = 0;
   failNextComments = 0;
   private seq = 0;
 
-  async register(): Promise<void> { this.registered++; }
+  async register(): Promise<void> {
+    this.registered++;
+    if (this.failRegistrations > 0) {
+      this.failRegistrations--;
+      throw new Error('Request failed with status code 500');
+    }
+  }
   async getTask(): Promise<LarkTask> { return this.task; }
   async listComments(): Promise<LarkTaskComment[]> { return [...this.comments]; }
   async createComment(_guid: string, content: string): Promise<string> {
@@ -97,6 +104,7 @@ function harness(storeFile = join(dir, 'state.json')): Harness {
     canOperate: openId => openId === OWNER,
     // Never let a real interval fire inside a test.
     pollIntervalMs: 3_600_000,
+    sleep: async () => {},
   });
   return h;
 }
@@ -261,6 +269,28 @@ describe('LarkTaskAgent', () => {
     expect(h.store.listPending()).toEqual([]);
   });
 
+  it('does not let a turn whose result was lost block later replies', async () => {
+    const h = harness();
+    await h.agent.handleEvent(assigned);
+    h.results.set('trg-1', { ok: true, state: 'completed', output: { content: '第一版' } });
+    await h.agent.pollOnce();
+
+    h.api.userComment('c-1', '第一次追问');
+    await h.agent.handleEvent(commented);
+    h.api.userComment('c-2', '第二次追问');
+    await h.agent.handleEvent(commented);
+    expect(h.store.get(GUID)?.pending.map(p => p.triggerId)).toEqual(['trg-2', 'trg-3']);
+
+    // trg-2 never reports; trg-3 completes.
+    h.results.set('trg-3', { ok: true, state: 'completed', output: { content: '第二次的回答' } });
+    await h.agent.pollOnce();
+    const replies = h.api.botComments();
+    expect(replies.at(-2)).toContain('没有取回');
+    expect(replies.at(-1)).toBe('第二次的回答');
+    expect(h.api.statuses.at(-1)).toEqual({ status: 4, progress: '执行完成' });
+    expect(h.store.listPending()).toEqual([]);
+  });
+
   it('settles a turn left pending by a restart', async () => {
     const file = join(dir, 'restart.json');
     const first = harness(file);
@@ -274,6 +304,22 @@ describe('LarkTaskAgent', () => {
     await second.agent.pollOnce();
     expect(second.api.botComments()).toEqual(['重启后补发']);
     expect(second.api.statuses.at(-1)).toEqual({ status: 4, progress: '执行完成' });
+  });
+});
+
+describe('LarkTaskAgent registration', () => {
+  it('retries a registration that fails at first', async () => {
+    const h = harness();
+    h.api.failRegistrations = 2;
+    await h.agent.start();
+    expect(h.api.registered).toBe(3);
+  });
+
+  it('gives up after three attempts without throwing', async () => {
+    const h = harness();
+    h.api.failRegistrations = 10;
+    await expect(h.agent.start()).resolves.toBeUndefined();
+    expect(h.api.registered).toBe(3);
   });
 });
 
