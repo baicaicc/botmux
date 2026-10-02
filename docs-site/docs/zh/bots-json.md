@@ -311,6 +311,7 @@ Dashboard 的「Bot 配置 → 消息卡片 → 实时卡片按钮」提供同�
 | 字段 | 说明 |
 |------|------|
 | `autoInviteOwnerOnGroupAdd` | 默认开：bot 被拉进新群时自动把 owner（管理员）拉进同一个群，避免 bot 落在 owner 看不到的群里；显式 `false` 关闭（适合告警/oncall 平台批量拉事件群）。仅作用于 bot 被动入群；Dashboard「Bot 默认 → 主动开工」与飞书 `/botconfig set autoInviteOwnerOnGroupAdd off` 均可关，选回开即删键回默认 |
+| `taskAgent` | `true` 时，Bot 登记为 Lark 任务智能体：在「任务」里把负责人选成该 Bot，就会起一个虚拟会话执行；最终回复写成任务评论，授权用户在任务下评论会续同一会话。需要机器人权限 `task:task:read`、`task:task:write`、`task:comment:read`、`task:comment:write`，并为应用订阅 `task.task.update_user_access_v2` 事件。只有 `allowedUsers` 创建的任务和写的评论会触发 |
 | `autoStartOnGroupJoin` | `true` 时，被拉入含至少一名 `allowedUsers` 的新群即自动开工（不必 @）。需在飞书后台为该应用订阅 `im.chat.member.bot.added_v1` 事件 |
 | `autoStartOnGroupJoinPrompt` | 配合上面：自动开工的首轮 prompt；留空 / 空白则空消息开场，让 bot 自己读群上下文。`autoStartOnGroupJoin` 关闭时无意义 |
 | `autoStartOnNewTopic` | `true` 时，话题群里每个新话题的首条消息无需 @ 也自动开工（普通群无效）。默认被动（仅 @ 触发） |

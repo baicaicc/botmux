@@ -298,7 +298,7 @@ import {
   ensurePrincipalLaneInboundTurnBinding,
 } from './core/worker-pool.js';
 import { waitAllWithin, trackProducerQuiet, trackProcessExited } from './core/producer-quiescence.js';
-import { AbortDeadlineError, hasExactSafeJsonKeys, ipcRoute, isTrustedHostIpcRequest, JsonBodyTooLargeError, jsonRes, readJsonBody, runWithAbortDeadline, setBotName, setLarkAppId, startIpcServer, setBotRenamer, setBotAvatarChanger, setBotDescriptionManager, armCoreOnlyReadinessGate, setCoreOnlyReady, setSupervisorShutdownHandler, setCrossPrincipalInterruptionDisableHandler } from './core/dashboard-ipc-server.js';
+import { AbortDeadlineError, buildAsyncTriggerLookupResponse, hasExactSafeJsonKeys, ipcRoute, isTrustedHostIpcRequest, JsonBodyTooLargeError, jsonRes, readJsonBody, runWithAbortDeadline, setBotName, setLarkAppId, startIpcServer, setBotRenamer, setBotAvatarChanger, setBotDescriptionManager, armCoreOnlyReadinessGate, setCoreOnlyReady, setSupervisorShutdownHandler, setCrossPrincipalInterruptionDisableHandler } from './core/dashboard-ipc-server.js';
 import { setDeviceIsolationDaemonIdentity } from './core/device-isolation-daemon.js';
 import { currentDeviceIsolationFreezeLease } from './core/device-isolation-activation.js';
 import { reconcileContainmentHandlesOnBoot } from './core/mojo-containment.js';
@@ -372,6 +372,7 @@ import {
 import { publishTurnCliIdentity } from './core/turn-cli-identity.js';
 import { authorityForDispatch, dispatchCallerFromReply, deliverDispatchWithUser, resolveDispatchUser, DISPATCH_USER_DELIVERY_ROUTE, DISPATCH_USER_DELIVERY_MAX_BYTES } from './core/dispatch-user-delegation.js';
 import { resolveUnionIdFromOpenId } from './im/lark/client.js';
+import { getLarkTaskAgent, startLarkTaskAgent } from './services/lark-task-agent/index.js';
 import { triggerSessionTurn, reconcileIdempotencyLeasesOnBoot, convergeIdempotentAsyncTurnOnWorkerExit, externalEventOpensOwnTopic } from './core/trigger-session.js';
 import {
   runIdempotencyFailClose,
@@ -28051,6 +28052,9 @@ export async function startDaemon(botIndex?: number): Promise<void> {
         ctx.larkAppId,
         () => handleVcMeetingPush(ctx),
       ),
+      handleTaskEvent: cfg.taskAgent
+        ? (event) => getLarkTaskAgent(event.larkAppId)?.handleEvent(event) ?? Promise.resolve()
+        : undefined,
       beforeSessionTurn: (data, ctx) => maybeCatchUpVcMeetingConsumerBeforeTurn(data, ctx),
       isSessionOwner: (anchor, appId) => activeSessions.has(sessionKey(anchor, appId)),
       resolveReplyThreadAlias: (rootId, chatId, appId) => findChatReplyAlias(rootId, chatId, appId),
@@ -28155,6 +28159,17 @@ export async function startDaemon(botIndex?: number): Promise<void> {
   markIpcReady();
 
   for (const startDispatcher of startEventDispatchers) startDispatcher();
+  // Lark 任务入口：sessions are restored and the dispatcher is live, so a task
+  // agent can register and settle turns a restart left pending.
+  for (const bot of getAllBots()) {
+    const appId = bot.config.larkAppId;
+    if (!bot.config.taskAgent || bot.config.apiOnly) continue;
+    startLarkTaskAgent(appId, {
+      trigger: (req) => triggerSessionTurn(req, { larkAppId: appId, activeSessions }),
+      lookup: (sessionId, triggerId) => buildAsyncTriggerLookupResponse(sessionId, triggerId),
+      canOperate: (openId) => canOperate(appId, undefined, openId),
+    });
+  }
   xpiSessionStoreBusyNoticeReadyApps.add(cfg.larkAppId);
   // The restore preflight only records structured diagnostics. Human-readable
   // owner notices are emitted after the IM dispatcher startup boundary, never
