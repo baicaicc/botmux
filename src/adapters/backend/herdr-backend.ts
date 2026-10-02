@@ -569,6 +569,13 @@ export class HerdrBackend implements SessionBackend {
     return this.actuallyReattached;
   }
 
+  /** True only when spawn() launched the CLI process itself. Re-attaching to a
+   *  surviving agent or adopting an external pane observes a CLI that was
+   *  already running, so Herdr's status for it is not a boot-time guess. */
+  get launchedNewCli(): boolean {
+    return this.started && !this.actuallyReattached && !this.opts.externalTarget;
+  }
+
   spawn(bin: string, args: string[], opts: SpawnOpts): void {
     this.cols = opts.cols;
     this.rows = opts.rows;

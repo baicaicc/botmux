@@ -890,6 +890,37 @@ describe('HerdrBackend.spawn', () => {
     be.kill();
   });
 
+  it('launchedNewCli is true only when spawn() launched the CLI itself (AIO-178)', () => {
+    // The worker's startup guard keys on this: a freshly launched CLI may be
+    // reported idle while still booting, but a re-attached or adopted CLI was
+    // already running, so its first Herdr status stays authoritative.
+    setManagedLaunchResponses('claude');
+    const fresh = new HerdrBackend(SESSION);
+    expect(fresh.launchedNewCli).toBe(false);
+    fresh.spawn('claude', [], { cwd: '/work', cols: 80, rows: 24, env: {} });
+    expect(fresh.launchedNewCli).toBe(true);
+    fresh.kill();
+
+    setHerdrResponses([
+      { match: a => a[0] === 'session' && a[1] === 'list', reply: () => EXISTING_SESSION_REPLY },
+      { match: a => a.includes('agent') && a.includes('get'), reply: () => AGENT_GET_REPLY('1-1') },
+      { match: a => a.includes('agent') && a.includes('list'), reply: () => AGENT_LIST_REPLY('1-1') },
+      { match: a => a.includes('read') && (a.includes('agent') || a.includes('pane')), reply: () => PANE_READ_REPLY('') },
+    ]);
+    const reattached = new HerdrBackend(SESSION, { isReattach: true });
+    reattached.spawn('claude', [], { cwd: '/work', cols: 80, rows: 24, env: {} });
+    expect(reattached.isReattach).toBe(true);
+    expect(reattached.launchedNewCli).toBe(false);
+    reattached.kill();
+
+    const adopted = new HerdrBackend(SESSION, {
+      externalTarget: { sessionName: SESSION, target: '1-1', paneId: '1-1' },
+    });
+    adopted.spawn('', [], { cwd: '/work', cols: 80, rows: 24, env: {} });
+    expect(adopted.launchedNewCli).toBe(false);
+    adopted.kill();
+  });
+
   it('external target adopt: uses externalTarget paneId, never spawns server or agent', () => {
     setHerdrResponses([
       { match: a => a[0] === 'session' && a[1] === 'list', reply: () => EXISTING_SESSION_REPLY },
