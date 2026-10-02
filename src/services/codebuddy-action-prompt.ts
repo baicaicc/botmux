@@ -6,7 +6,7 @@ export function codebuddyActionPrompt(screen: string): string | undefined {
   const lines = screen.trimEnd().split('\n').slice(-35).map(line => line.replace(/[│┃╭╮╰╯┌┐└┘─━]/g, ' ').trim());
   let questionIndex = -1;
   for (let i = lines.length - 1; i >= 0; i--) {
-    if (lines[i] === 'Do you trust the files in this folder?' || /^(?:Do you want to proceed|Do you want to allow CodeBuddy to fetch this content|Do you want to (?:create|make|multi edit) .+)\?/i.test(lines[i])) {
+    if (lines[i] === 'Do you trust the files in this folder?' || /^(?:Do you want to proceed(?:\([^)]*\))?|Do you want to allow CodeBuddy to fetch this content|Do you want to (?:create|make|multi edit) .+)\?/i.test(lines[i])) {
       questionIndex = i;
       break;
     }
