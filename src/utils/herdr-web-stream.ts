@@ -2,6 +2,7 @@ import {spawn, type ChildProcessWithoutNullStreams} from 'node:child_process';
 import {createInterface} from 'node:readline';
 import {WebSocket} from 'ws';
 import {terminalWriteFrame} from '../core/terminal-write-frame.js';
+import { herdrExecutable } from './herdr-executable.js';
 
 export const HERDR_WEB_CONTROL_FAILED = 4409;
 
@@ -61,7 +62,7 @@ export function connectHerdrWebStream(ws: WebSocket, target: HerdrWebTarget, opt
     if (child || closed || !verify()) return;
     clearTimeout(startTimer);
     try {
-      child = spawn('herdr', ['--session', target.session, 'terminal', 'session',
+      child = spawn(herdrExecutable(), ['--session', target.session, 'terminal', 'session',
         options.write ? 'control' : 'observe', target.terminalId, '--cols', String(cols), '--rows', String(rows)],
       {stdio: ['pipe', 'pipe', 'pipe']});
       child.stderr.resume();

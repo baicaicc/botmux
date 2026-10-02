@@ -3,6 +3,7 @@ import { existsSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, isAbsolute, join } from 'node:path';
 import { safeFailureSummary } from './codex-transcript.js';
+import { herdrExecutable } from '../utils/herdr-executable.js';
 
 const SESSION_ID = /^session_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -22,7 +23,7 @@ export function inspectHerdrKimiOwner(
   expectedPid?: number,
 ): KimiNativeOwner | undefined {
   try {
-    const call = (args: string[]) => JSON.parse(execFileSync('herdr', ['--session', sessionName, ...args], {
+    const call = (args: string[]) => JSON.parse(execFileSync(herdrExecutable(), ['--session', sessionName, ...args], {
       encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'],
     }));
     const agent = () => call(['agent', 'get', agentName]).result?.agent;
