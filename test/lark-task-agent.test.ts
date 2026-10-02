@@ -31,10 +31,17 @@ class FakeApi implements LarkTaskApi {
   comments: LarkTaskComment[] = [];
   statuses: Array<{ status: number; progress: string }> = [];
   registered = 0;
+  failRegistrations = 0;
   failNextComments = 0;
   private seq = 0;
 
-  async register(): Promise<void> { this.registered++; }
+  async register(): Promise<void> {
+    this.registered++;
+    if (this.failRegistrations > 0) {
+      this.failRegistrations--;
+      throw new Error('Request failed with status code 500');
+    }
+  }
   async getTask(): Promise<LarkTask> { return this.task; }
   async listComments(): Promise<LarkTaskComment[]> { return [...this.comments]; }
   async createComment(_guid: string, content: string): Promise<string> {
@@ -97,6 +104,7 @@ function harness(storeFile = join(dir, 'state.json')): Harness {
     canOperate: openId => openId === OWNER,
     // Never let a real interval fire inside a test.
     pollIntervalMs: 3_600_000,
+    sleep: async () => {},
   });
   return h;
 }
@@ -274,6 +282,22 @@ describe('LarkTaskAgent', () => {
     await second.agent.pollOnce();
     expect(second.api.botComments()).toEqual(['重启后补发']);
     expect(second.api.statuses.at(-1)).toEqual({ status: 4, progress: '执行完成' });
+  });
+});
+
+describe('LarkTaskAgent registration', () => {
+  it('retries a registration that fails at first', async () => {
+    const h = harness();
+    h.api.failRegistrations = 2;
+    await h.agent.start();
+    expect(h.api.registered).toBe(3);
+  });
+
+  it('gives up after three attempts without throwing', async () => {
+    const h = harness();
+    h.api.failRegistrations = 10;
+    await expect(h.agent.start()).resolves.toBeUndefined();
+    expect(h.api.registered).toBe(3);
   });
 });
 

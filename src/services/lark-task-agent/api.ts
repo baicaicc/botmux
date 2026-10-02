@@ -81,7 +81,6 @@ function toTask(raw: any): LarkTask {
 export function createLarkTaskApi(larkAppId: string): LarkTaskApi {
   return {
     async register() {
-      // The body must be a JSON object: an absent body returns 2200 Internal Error.
       await call(larkAppId, 'POST', '/open-apis/task/v2/agent/register_agent', undefined, {});
       await call(larkAppId, 'POST', '/open-apis/task/v2/task_v2/task_subscription', { user_id_type: 'open_id' }, {});
     },
