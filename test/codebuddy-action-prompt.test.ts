@@ -18,6 +18,27 @@ it('projects a CodeBuddy permission picker without copying its command', () => {
   expect(prompt).not.toContain('/private/credentials.txt');
 });
 
+it('projects the proceed question with a parenthetical note and its choices', () => {
+  const prompt = codebuddyActionPrompt([
+    ' Bash command',
+    '',
+    '   which botmux && botmux --help 2>&1 | head -50',
+    '   Check botmux availability and help',
+    '',
+    ' Do you want to proceed(Unknown command - please verify before proceeding)?',
+    '',
+    ' > 1. Yes',
+    '   2. Yes, and don\'t ask again for session (shift + tab)',
+    '   3. No, and tell CodeBuddy what to do differently (escape)',
+  ].join('\n'));
+  expect(prompt).toContain('Bash command');
+  expect(prompt).toContain('Do you want to proceed(Unknown command - please verify before proceeding)?');
+  expect(prompt).toContain('1. Yes');
+  expect(prompt).toContain('2. Yes, and don\'t ask again for session (shift + tab)');
+  expect(prompt).toContain('3. No, and tell CodeBuddy what to do differently (escape)');
+  expect(prompt).not.toContain('which botmux && botmux --help');
+});
+
 it('ignores arbitrary terminal text and incomplete choice lists', () => {
   expect(codebuddyActionPrompt('Do you want to proceed?\n1. Yes\n2. No')).toBeUndefined();
   expect(codebuddyActionPrompt('Bash command\nDo you want to proceed?\n1. Yes')).toBeUndefined();
