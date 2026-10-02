@@ -19115,6 +19115,9 @@ function startScreenUpdates(): void {
   // CodeBuddy 确认框通知的去重游标（fork 自有）。
   let lastCodebuddyActionPrompt = '';
   let lastCodebuddyActionTurnId: string | undefined;
+  // Last Claude permission dialog already notified (dedup by projection text;
+  // cleared when the dialog leaves the screen so the next one notifies again).
+  let lastClaudeActionPrompt = '';
   // PTY-activity watermark of the last tick that actually captured. The screen
   // normally reaches us only through onPtyData (it updates lastPtyActivityAtMs
   // and feeds the renderer in the same place), so when this hasn't advanced the
