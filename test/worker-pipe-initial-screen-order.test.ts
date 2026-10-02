@@ -739,6 +739,24 @@ describe('worker pipe initial screen ordering', () => {
     expect(ready).toBeGreaterThan(structuredDrain);
   });
 
+  it('never lets Herdr status be a CLI\'s first readiness signal (AIO-178)', () => {
+    // Herdr can report idle while a CLI is still booting; Kimi and CodeBuddy
+    // have no startup guard of their own, so the first prompt must wait for a
+    // prompt confirmed by screen/ready-gate evidence.
+    const source = readFileSync(join(process.cwd(), 'src/worker.ts'), 'utf8');
+    const hookStart = source.indexOf('observedBackend.onAgentStatus((status) => {');
+    const hookEnd = source.indexOf('backend.onAccessUrl?.', hookStart);
+    const hook = source.slice(hookStart, hookEnd);
+    const guard = hook.indexOf('if (promptReadyEdges === promptReadyEdgesAtSpawn) {');
+    expect(guard).toBeGreaterThan(-1);
+    expect(guard).toBeLessThan(hook.indexOf("drainBridgesThenMarkReady('structured');"));
+    expect(source.lastIndexOf('const promptReadyEdgesAtSpawn = promptReadyEdges;', hookStart)).toBeGreaterThan(hookStart - 200);
+
+    const readyStart = source.indexOf('function markPromptReady(): void {');
+    const ready = source.slice(readyStart, source.indexOf('\nfunction ', readyStart + 10));
+    expect(ready.indexOf('promptReadyEdges++;')).toBeGreaterThan(ready.indexOf('isPromptReady = true;'));
+  });
+
   it('hard-gates an unavailable persistent backend instead of silently falling back to pty', () => {
     const source = readFileSync(join(process.cwd(), 'src/worker.ts'), 'utf8');
     const guardStart = source.indexOf('let effectiveBackend = cfg.backendType;');
