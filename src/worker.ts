@@ -18255,11 +18255,10 @@ async function spawnCli(
     observedBackend.onAgentStatus((status) => {
       if (backend !== observedBackend) return;
       if (status === 'idle' || status === 'done') {
-        // Herdr status only speeds up turn boundaries; it is never this CLI's
-        // first readiness signal. Herdr can report idle while a CLI is still
-        // booting, and adapters without a startup guard (Kimi, CodeBuddy) would
-        // then type the first prompt into a half-started TUI.
-        if (promptReadyEdges === promptReadyEdgesAtSpawn) {
+        // A just-launched CLI may be reported idle while booting (Kimi and
+        // CodeBuddy have no startup guard), so Herdr status is never its first
+        // readiness signal. Re-attached/adopted CLIs were already running.
+        if (observedBackend.launchedNewCli && promptReadyEdges === promptReadyEdgesAtSpawn) {
           log(`Herdr agent ${status} before this CLI's first confirmed prompt — leaving startup readiness to screen evidence`);
           return;
         }

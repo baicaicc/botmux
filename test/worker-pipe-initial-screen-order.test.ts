@@ -739,15 +739,16 @@ describe('worker pipe initial screen ordering', () => {
     expect(ready).toBeGreaterThan(structuredDrain);
   });
 
-  it('never lets Herdr status be a CLI\'s first readiness signal (AIO-178)', () => {
+  it('never lets Herdr status be a freshly launched CLI\'s first readiness signal (AIO-178)', () => {
     // Herdr can report idle while a CLI is still booting; Kimi and CodeBuddy
     // have no startup guard of their own, so the first prompt must wait for a
-    // prompt confirmed by screen/ready-gate evidence.
+    // prompt confirmed by screen/ready-gate evidence. A re-attached CLI was
+    // already running and keeps the immediate status (launchedNewCli=false).
     const source = readFileSync(join(process.cwd(), 'src/worker.ts'), 'utf8');
     const hookStart = source.indexOf('observedBackend.onAgentStatus((status) => {');
     const hookEnd = source.indexOf('backend.onAccessUrl?.', hookStart);
     const hook = source.slice(hookStart, hookEnd);
-    const guard = hook.indexOf('if (promptReadyEdges === promptReadyEdgesAtSpawn) {');
+    const guard = hook.indexOf('if (observedBackend.launchedNewCli && promptReadyEdges === promptReadyEdgesAtSpawn) {');
     expect(guard).toBeGreaterThan(-1);
     expect(guard).toBeLessThan(hook.indexOf("drainBridgesThenMarkReady('structured');"));
     expect(source.lastIndexOf('const promptReadyEdgesAtSpawn = promptReadyEdges;', hookStart)).toBeGreaterThan(hookStart - 200);
