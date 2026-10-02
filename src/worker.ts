@@ -76,6 +76,7 @@ import { roleLibraryRoot, roleLibrarySubtree } from './core/role-library.js';
 import { larkTransportEnabled as sessionLarkTransportEnabled } from './core/types.js';
 import { drainTranscript, joinAssistantText, trailingAssistantText, findJsonlContainingFingerprint, findJsonlsContainingExactContent, findLatestJsonl, extractLastAssistantTurn, stringifyUserContent, extractTurnStartText, splitTranscriptEventsByCutoff, isTranscriptRateLimitEvent, apiErrorMessageText, extractCotEntries, ClaudeModelFallbackTracker, BackgroundTaskTracker, type ModelFallbackObservation, type TranscriptEvent } from './services/claude-transcript.js';
 import { BridgeTurnQueue, makeFingerprint, normaliseForFingerprint, type BridgePendingTurn } from './services/bridge-turn-queue.js';
+import { createTranscriptTerminalSettle } from './services/transcript-terminal-settle.js';
 import { bridgePostText, composeFailedBridgeFallbackContent, isBridgeNothingToSendFinal, shouldEmitEmptyCompletedBridgeFallback, shouldSuppressBridgeEmit, shouldSuppressStructuredFallback, structuredFallbackKind, stripTrailingBridgeSentinelLine, stripTrailingOaiMemoryCitation, type BridgeSendMarker } from './services/bridge-fallback-gate.js';
 import { buildSubmitMessagePreview } from './services/submit-notification.js';
 import {
@@ -6149,6 +6150,15 @@ function maybeFollowSessionRotationViaPid(): PidFollowResult {
     log(`Bridge fs.watch unavailable on rotated target (${err.message}); relying on fallback poller`);
   }
   return 'switched';
+}
+
+/** True while the head Lark/API turn's terminal marker has not been read from
+ *  the Claude transcript yet. Locally typed turns never hold a settle. */
+function bridgeHeadTurnAwaitingTerminal(): boolean {
+  if (!bridgeJsonlPath || lastInitConfig?.adoptMode) return false;
+  try { bridgeIngest(); } catch { /* best effort */ }
+  const head = bridgeQueue.peek()[0];
+  return !!head && !head.isLocal && !head.terminalObserved;
 }
 
 function bridgeIngest(): void {
@@ -18274,6 +18284,7 @@ async function spawnCli(
     onPtyData(data);
   });
   if (observedBackend instanceof HerdrBackend) {
+    const transcriptSettle = createTranscriptTerminalSettle({ awaitingTerminal: bridgeHeadTurnAwaitingTerminal });
     const promptReadyEdgesAtSpawn = promptReadyEdges;
     observedBackend.onAgentStatus((status) => {
       if (backend !== observedBackend) return;
@@ -18286,8 +18297,14 @@ async function spawnCli(
           return;
         }
         log(`Herdr agent ${status} — draining bridges before marking prompt ready`);
-        drainBridgesThenMarkReady('structured');
+        // The stop hook behind this status can beat the transcript write of the
+        // turn's final assistant line; settle (bounded) so that answer is not lost.
+        transcriptSettle.request(() => {
+          if (backend !== observedBackend) return;
+          drainBridgesThenMarkReady('structured');
+        });
       } else if (status === 'working') {
+        transcriptSettle.cancel();
         isPromptReady = false;
         idleDetector?.reset();
       }
