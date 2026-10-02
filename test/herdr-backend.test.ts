@@ -1300,6 +1300,49 @@ describe('HerdrBackend callbacks', () => {
     be.kill();
   });
 
+  it('backs an unchanged pane off to 5 s and returns to 500 ms on new output or input (AIO-178)', () => {
+    let paneText = 'idle';
+    setHerdrResponses([
+      { match: a => a[0] === 'session' && a[1] === 'list', reply: () => EXISTING_SESSION_REPLY },
+      { match: a => a.includes('agent') && a.includes('get'), reply: () => AGENT_GET_REPLY('1-1') },
+      { match: a => a.includes('agent') && a.includes('list'), reply: () => AGENT_LIST_REPLY('1-1') },
+      { match: a => a.includes('read') && (a.includes('agent') || a.includes('pane')), reply: () => PANE_READ_REPLY(paneText) },
+    ]);
+    vi.useFakeTimers();
+    const be = new HerdrBackend(SESSION, { isReattach: true });
+    const seen: string[] = [];
+    be.onData(d => seen.push(d));
+    be.spawn('claude', [], { cwd: '/work', cols: 80, rows: 24, env: {} });
+    const reads = () => mockedExecFileSync.mock.calls.filter(call => (call[1] as string[]).includes('read')).length;
+
+    // Six unchanged polls at 500 ms, then 1 s, 2 s, 4 s and a 5 s cap.
+    const start = reads();
+    vi.advanceTimersByTime(3_000);
+    expect(reads() - start).toBe(6);
+    vi.advanceTimersByTime(1_000 + 2_000 + 4_000 + 5_000);
+    expect(reads() - start).toBe(10);
+    vi.advanceTimersByTime(10_000);
+    expect(reads() - start).toBe(12);
+
+    // Output that appears while backed off arrives within one capped interval,
+    // and the cadence is fast again right after it.
+    paneText = 'idle!';
+    vi.advanceTimersByTime(5_000);
+    expect(seen).toEqual(['!']);
+    const afterOutput = reads();
+    vi.advanceTimersByTime(1_000);
+    expect(reads() - afterOutput).toBe(2);
+
+    // Input pulls a backed-off poll in to 500 ms.
+    vi.advanceTimersByTime(30_000);
+    const beforeInput = reads();
+    be.write('hi');
+    vi.advanceTimersByTime(500);
+    expect(reads() - beforeInput).toBe(1);
+
+    be.kill();
+  });
+
   it('onData fresh-spawn baseline: lastText starts empty so listeners see initial output', () => {
     // Counterpart to the reattach test: a fresh spawn keeps lastText='' so
     // listeners attached *before* spawn don't miss output the agent emitted
