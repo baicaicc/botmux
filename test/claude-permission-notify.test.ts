@@ -108,3 +108,9 @@ it('rejects malformed optional correlation metadata without altering legacy ask 
   expect(parseAskBody(body)).not.toHaveProperty('error');
   expect(parseAskBody({...body, permissionCommandHash: 'invalid'})).toEqual({error: 'bad_permissionCommandHash'});
 });
+
+it('does not re-notify when status text below the dialog changes', () => {
+  const first = claudePermissionScreen(screen() + '\n tokens: 10')!;
+  const next = claudePermissionScreen(screen() + '\n tokens: 11')!;
+  expect(next.dialogId).toBe(first.dialogId);
+});

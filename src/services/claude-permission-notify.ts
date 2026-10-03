@@ -53,7 +53,8 @@ export function claudePermissionScreen(screen: string): PermissionScreen | undef
   // Include the dialog body to distinguish successive commands with identical
   // projected title/options. Never include conversation above this dialog.
   const start = title >= 0 ? title : Math.max(0, question - 15);
-  return { message, dialogId: hash(lines.slice(start).join('\n')), commandHash: commandHash(command) };
+  const footer = lines.findIndex((line, i) => i > question && /^Esc to cancel\b/.test(line.trim()));
+  return { message, dialogId: hash(lines.slice(start, footer + 1).join('\n')), commandHash: commandHash(command) };
 }
 
 interface PermissionScope {
