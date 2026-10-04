@@ -12675,6 +12675,7 @@ function scheduleSubmitFailureNotify(
       } catch { submitDiagnosisScreen = ''; }
     }
     const submitDiagnosis = diagnoseSubmitFailure({
+      cliId: lastInitConfig?.cliId,
       screenText: submitDiagnosisScreen,
       lastActivityAtMs: lastPtyActivityAtMs,
     });
