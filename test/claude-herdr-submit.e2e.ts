@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { HerdrBackend } from '../src/adapters/backend/herdr-backend.js';
 import { createClaudeCodeAdapter, claudeJsonlPathForSession } from '../src/adapters/cli/claude-code.js';
+import { stripAnsiScreenText } from '../src/utils/idle-detector.js';
 import { ensureClaudeFolderTrust } from '../src/core/worker-pool.js';
 import { resolveCommand } from '../src/adapters/cli/registry.js';
 
@@ -42,7 +43,7 @@ describe.skipIf(process.env.BOTMUX_CLAUDE_HERDR_E2E !== '1')('real Claude Herdr 
     const content = '<user_message>\n中文第一行，保持原文。\nsecond line with literal \\ backslash\nReply with exactly: QUEUED_PONG\n</user_message>';
     try {
       backend.spawn(resolveCommand('claude'), ['--session-id', sid, '--model', process.env.BOTMUX_CLAUDE_TEST_MODEL ?? 'haiku', '--effort', 'low', '--dangerously-skip-permissions', '--settings', JSON.stringify({ disableAllHooks: true, skipDangerousModePermissionPrompt: true, env: providerEnv })], { cwd, cols: 160, rows: 50, env: env as Record<string, string> });
-      await until(() => /─+\r?\n❯/.test(backend.captureCurrentScreen()), 'Claude ready');
+      await until(() => /─+\r?\n❯/.test(stripAnsiScreenText(backend.captureCurrentScreen())), 'Claude ready');
       console.log('test ready', backend.captureCurrentScreen());
       const first = await adapter.writeInput(backend, 'Run Bash with exactly this command: python3 -c "import time; print(\'BUSY_BEGIN\', flush=True); time.sleep(12)". Then reply FIRST_PONG.');
       if (first?.submitted === false && first.recheck) await until(() => first.recheck!() === true, 'first delayed receipt', 20_000);
