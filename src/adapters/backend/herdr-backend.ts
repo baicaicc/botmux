@@ -737,6 +737,12 @@ export class HerdrBackend implements SessionBackend {
     );
   }
 
+  /** One frame avoids per-line Enter/paste-burst ambiguity in Claude's composer.
+   * write() also preserves the guarded shared-input ownership boundary. */
+  sendBracketedPaste(text: string): boolean {
+    return this.write('\x1b[200~' + text + '\x1b[201~');
+  }
+
   pasteText(text: string): boolean {
     return this.sendText(text);
   }
