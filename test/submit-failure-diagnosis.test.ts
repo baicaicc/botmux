@@ -434,3 +434,14 @@ describe('shouldWaitThroughBusyTurn', () => {
     expect(shouldWaitThroughBusyTurn({ ...base, waitsSoFar: 99 })).toBe(false);
   });
 });
+
+describe('expanded Claude composer draft', () => {
+  const screenText = 'previous response\n────────────────────────\n❯ <botmux_reminder>reply</botmux_reminder>\\\n  <user_message>\\\n  first line\\\n  second line\\\n  </user_message>\n────────────────────────\n  bypass permissions on';
+  it('finds a parked BotMux payload even while the previous turn is active', () => {
+    expect(diagnoseSubmitFailure({ screenText, cliId: 'claude-code', nowMs: NOW, lastActivityAtMs: NOW })).toEqual({ reason: 'draft_parked', evidence: 'screen', matched: 'draft_parked:claude_composer' });
+  });
+  it('does not reinterpret another CLI or quoted transcript as a draft', () => {
+    expect(diagnoseSubmitFailure({ screenText, cliId: 'codex' }).reason).toBe('unknown');
+    expect(diagnoseSubmitFailure({ screenText: '<user_message>quoted example</user_message>\n────────────────────────\n❯\n────────────────────────', cliId: 'claude-code' }).reason).toBe('unknown');
+  });
+});
