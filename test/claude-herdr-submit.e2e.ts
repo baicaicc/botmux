@@ -12,6 +12,12 @@ function records(path: string): any[] {
   if (!existsSync(path)) return [];
   return readFileSync(path, 'utf8').split('\n').flatMap(line => { try { return [JSON.parse(line)]; } catch { return []; } });
 }
+// Native Claude may wrap a bracketed paste in a generated attachment tag.
+function queuedPayload(content: unknown): unknown {
+  if (typeof content !== 'string') return content;
+  const match = /^<pasted_content id="([^"]+)">\n([\s\S]*)\n<\/pasted_content id="\1">$/.exec(content);
+  return match ? match[2] : content;
+}
 async function until(predicate: () => boolean, label: string, timeout = 90_000) {
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) { if (predicate()) return; await new Promise(resolve => setTimeout(resolve, 150)); }
@@ -51,9 +57,9 @@ describe.skipIf(process.env.BOTMUX_CLAUDE_HERDR_E2E !== '1')('real Claude Herdr 
       await until(() => events().some(e => e.type === 'assistant' && e.message?.content?.some((b: any) => b.type === 'tool_use' && b.name === 'Bash')), 'Bash execution began');
       const next = await adapter.writeInput(backend, content);
       expect(next?.submitted).not.toBe(false);
-      await until(() => events().some(e => e.type === 'queue-operation' && e.operation === 'enqueue' && e.content === content), 'exact type-ahead enqueue');
+      await until(() => events().some(e => e.type === 'queue-operation' && e.operation === 'enqueue' && queuedPayload(e.content) === content), 'exact type-ahead enqueue');
       await until(() => events().some(e => e.type === 'assistant' && e.message?.content?.some((b: any) => b.type === 'text' && b.text.includes('QUEUED_PONG'))), 'queued model response');
-      const queued = events().filter(e => e.type === 'queue-operation' && e.operation === 'enqueue' && e.content === content);
+      const queued = events().filter(e => e.type === 'queue-operation' && e.operation === 'enqueue' && queuedPayload(e.content) === content);
       expect(queued).toHaveLength(1);
       console.log(JSON.stringify({ sid, transcript: backend.claudeJsonlPath, queued: queued.length, exactMultiline: true, response: 'QUEUED_PONG' }));
     } catch (error) {
