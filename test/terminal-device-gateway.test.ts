@@ -208,7 +208,7 @@ describe('terminal device gateway with real HTTP and WebSocket proxy', () => {
     const pair = await beginPair(f, 'write');
     const html = await pair.response.text();
     expect(html).toContain(pair.notification.code);
-    expect(html).toContain('本次只授权当前会话的查看和操作');
+    expect(html).toContain('当前入口为查看和操作');
     expect(html).not.toContain(f.sessions.get(SID_A)!.writeToken);
     expect(pair.response.headers.get('set-cookie')).toMatch(/; Path=\/; Secure; HttpOnly; SameSite=Lax; Max-Age=\d+/);
     expect(pair.cookie).toMatch(/^__Host-botmux_terminal_device=[A-Za-z0-9_-]{43}$/);
@@ -241,6 +241,25 @@ describe('terminal device gateway with real HTTP and WebSocket proxy', () => {
     const echoed = new Promise<string>(resolve => ws.once('message', data => resolve(data.toString())));
     ws.send('round-trip');
     expect(await echoed).toBe('echo:round-trip');
+  });
+
+  it('one confirmation releases two waiting session pages while keeping native WebSocket scopes separate', async () => {
+    const f = await fixture();
+    const first = await beginPair(f);
+    const second = await request(f, `?token=${f.sessions.get(SID_B)!.writeToken}`, first.cookie, SID_B);
+    expect(second.status).toBe(200);
+    expect(second.headers.get('set-cookie')!.split(';', 1)[0]).toBe(first.cookie);
+    expect(f.notifications).toHaveLength(2);
+    expect(await (await request(f, '_device/status?access=write', first.cookie, SID_B)).json()).toEqual({ paired: false });
+    expect((await request(f, '?viewToken=invalid', first.cookie, SID_C)).status).toBe(403);
+    expect(f.store.approve({ code: first.notification.code, sessionId: SID_A, ownerId: OWNER }).ok).toBe(true);
+    expect(await (await request(f, '_device/status?access=read', first.cookie)).json()).toEqual({ paired: true });
+    expect(await (await request(f, '_device/status?access=write', first.cookie, SID_B)).json()).toEqual({ paired: true });
+    expect((await openWs(f, first.cookie)).first.claims.scope).toBe('read');
+    expect((await openWs(f, first.cookie, 'write', SID_B)).first.claims.scope).toBe('write');
+    expect(await deniedWs(f, '?access=write', first.cookie)).toBe(403);
+    expect((await request(f, '?access=read', first.cookie, SID_C)).status).toBe(403);
+    expect(f.notifications).toHaveLength(2);
   });
 
   it('keeps the browser credential and short code usable when Lark notification fails, then retries delivery without changing the pair', async () => {

@@ -46,7 +46,7 @@ function input(browserToken: string, scope: TerminalDeviceScope = 'read', sid = 
   return { browserToken, sessionId: sid, scope, ownerId: owner };
 }
 
-describe('single-session terminal browser pairing', () => {
+describe('terminal browser pairing with session-scoped access', () => {
   it('starts unpaired and approves only the pinned owner and session, once', () => {
     const pending = store.startPair({ sessionId, scope: 'read', ownerId });
     expect(pending.code).toMatch(/^[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{8}$/);
@@ -114,6 +114,42 @@ describe('single-session terminal browser pairing', () => {
       expect(store.identity(token)).toBeNull();
       expect(store.access(input(token, 'write'))).toBeNull();
     }
+  });
+
+  it('one approval releases already-open tabs only for the same browser and owner, preserving link scopes', () => {
+    const first = store.startPair({ sessionId, scope: 'read', ownerId });
+    const peer = new TerminalDeviceStore({ dataDir, botId, now: () => now });
+    const second = peer.startPair({ sessionId: 'session-b', scope: 'write', ownerId, browserToken: first.browserToken });
+    const readOnly = peer.startPair({ sessionId: 'session-c', scope: 'read', ownerId, browserToken: first.browserToken });
+    const otherBrowser = store.startPair({ sessionId: 'session-b', scope: 'write', ownerId });
+    const otherOwner = store.startPair({ sessionId: 'session-b', scope: 'write', ownerId: 'owner-b', browserToken: first.browserToken });
+    expect(second.browserToken).toBe(first.browserToken);
+    expect(store.approve({ code: first.code, sessionId, ownerId }).ok).toBe(true);
+    expect(peer.access(input(first.browserToken))).toBeTruthy();
+    expect(peer.access(input(first.browserToken, 'write'))).toBeNull();
+    expect(peer.access(input(first.browserToken, 'write', 'session-b'))).toBeTruthy();
+    expect(peer.access(input(first.browserToken, 'read', 'session-c'))).toBeTruthy();
+    expect(peer.access(input(first.browserToken, 'write', 'session-c'))).toBeNull();
+    expect(peer.access(input(first.browserToken, 'read', 'unopened-session'))).toBeNull();
+    expect(peer.identity(otherBrowser.browserToken)).toBeNull();
+    expect(peer.identity(otherOwner.browserToken)).toBeNull();
+    expect(peer.access(input(first.browserToken, 'write', 'session-b', 'owner-b'))).toBeNull();
+    for (const request of [second, readOnly]) {
+      expect(peer.approve({ code: request.code, sessionId: request === second ? 'session-b' : 'session-c', ownerId }))
+        .toEqual({ ok: false, reason: 'not_found' });
+    }
+    expect(peer.approve({ code: otherBrowser.code, sessionId: 'session-b', ownerId }).ok).toBe(true);
+    expect(peer.approve({ code: otherOwner.code, sessionId: 'session-b', ownerId: 'owner-b' }).ok).toBe(true);
+  });
+
+  it('one approval does not grant an expired request from another already-open tab', () => {
+    const expired = store.startPair({ sessionId: 'expired-session', scope: 'write', ownerId });
+    now += 60_000;
+    const live = store.startPair({ sessionId, scope: 'read', ownerId, browserToken: expired.browserToken });
+    now = expired.expiresAt;
+    expect(store.approve({ code: live.code, sessionId, ownerId }).ok).toBe(true);
+    expect(store.access(input(live.browserToken))).toBeTruthy();
+    expect(store.access(input(live.browserToken, 'write', 'expired-session'))).toBeNull();
   });
 
   it('expires the five minute approval code exactly at its fixed boundary', () => {
