@@ -200,8 +200,16 @@ export class TerminalDeviceStore {
       state.devices.push(device);
     }
     if (device.ownerId !== pending.ownerId) return { ok: false, reason: 'owner_mismatch' };
-    state.pending = state.pending.filter(item => item !== pending);
-    this.addGrant(state, device, pending.sessionId, pending.scope, now);
+    // These requests have already passed their own session capability checks.
+    // Release tabs opened before approval, just as opening those same links
+    // after approval grants access directly to the remembered browser.
+    const browserRequests = state.pending.filter(item => item.tokenHash === pending.tokenHash
+      && item.ownerId === pending.ownerId);
+    for (const request of browserRequests) {
+      this.addGrant(state, device, request.sessionId, request.scope, now);
+    }
+    state.pending = state.pending.filter(item => item.tokenHash !== pending.tokenHash
+      || item.ownerId !== pending.ownerId);
     this.save(state);
     return { ok: true, ...identityOf(device) };
   }
