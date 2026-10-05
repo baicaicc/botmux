@@ -48,7 +48,7 @@ export function approveTerminalDevice(input: { larkAppId: string; sessionId: str
   try {
     const result = store.approve({ code: input.code, sessionId: input.sessionId, ownerId: terminalDeviceOwnerKey(ownerId) });
     return result.ok
-      ? { ok: true, message: '设备配对成功，浏览器会自动进入当前会话。' }
+      ? { ok: true, message: '设备配对成功，此浏览器中等待确认的会话页面会自动进入。' }
       : { ok: false, message: '配对码已过期、已使用或不属于当前会话，请重新打开原 Lark 链接。' };
   } catch { return { ok: false, message: '设备授权暂时不可用，请稍后重试。' }; }
 }
@@ -58,7 +58,7 @@ export function buildTerminalDevicePairingCard(input: { rootId: string; sessionI
     config: { wide_screen_mode: true },
     header: { title: { tag: 'plain_text', content: '确认浏览器设备配对' }, template: 'blue' },
     elements: [
-      { tag: 'markdown', content: `浏览器短码：**${input.code}**\n请核对手机页面上的短码。\n本次仅授权会话 \`${input.sessionId.slice(0, 8)}\` 的${input.scope === 'write' ? '查看和操作' : '查看'}，配对码 5 分钟内有效。` },
+      { tag: 'markdown', content: `浏览器短码：**${input.code}**\n请核对浏览器页面上的短码。\n当前会话 \`${input.sessionId.slice(0, 8)}\` 的入口为${input.scope === 'write' ? '查看和操作' : '只读查看'}。配对此浏览器后，同一入口的其他话题无需重复确认；各会话权限仍由各自的 Lark 链接决定。配对码 5 分钟内有效。` },
       { tag: 'action', actions: [{ tag: 'button', type: 'primary', text: { tag: 'plain_text', content: '确认配对' }, value: { action: 'terminal_device_approve', root_id: input.rootId, session_id: input.sessionId, code: input.code } }] },
       { tag: 'note', elements: [{ tag: 'plain_text', content: `也可以在原会话发送 /term pair ${input.code}。只确认自己正在打开的浏览器。` }] },
     ],
