@@ -9,6 +9,7 @@ import { TerminalDeviceGateway } from '../src/core/terminal-device-gateway.js';
 import { TerminalDeviceStore } from '../src/core/terminal-device-store.js';
 import { verifyTerminalControlGrant, type TerminalControlGrantClaims } from '../src/core/terminal-control-grant.js';
 import { startTerminalProxy, type TerminalProxyHandle } from '../src/core/terminal-proxy.js';
+import { deriveTerminalCardViewToken } from '../src/core/terminal-write-auth.js';
 
 const SID_A = '11111111-1111-4111-8111-111111111111';
 const SID_B = '22222222-2222-4222-8222-222222222222';
@@ -30,7 +31,7 @@ interface Fixture {
   resolved: string[];
   sockets: Set<Socket>;
   clients: Set<WebSocket>;
-  sessions: Map<string, { ownerId: string; writeToken: string; viewToken: string }>;
+  sessions: Map<string, { ownerId: string; writeToken: string; viewToken: string; cardViewToken?: string }>;
 }
 
 const fixtures: Fixture[] = [];
@@ -50,7 +51,7 @@ afterEach(async () => {
 
 async function fixture(options: { notifyPairing?: () => Promise<void>; legacyCookieNames?: RegExp } = {}): Promise<Fixture> {
   const dataDir = mkdtempSync(join(tmpdir(), 'botmux-device-gateway-'));
-  const sessions = new Map([
+  const sessions: Fixture['sessions'] = new Map([
     [SID_A, { ownerId: OWNER, writeToken: 'session-a-private-write', viewToken: 'session-a-private-view' }],
     [SID_B, { ownerId: OWNER, writeToken: 'session-b-private-write', viewToken: 'session-b-private-view' }],
     [SID_C, { ownerId: 'different-owner', writeToken: 'session-c-private-write', viewToken: 'session-c-private-view' }],
@@ -179,6 +180,29 @@ async function rawRequest(f: Fixture, path: string, headers: string[], method = 
 }
 
 describe('terminal device gateway with real HTTP and WebSocket proxy', () => {
+  it('redeems lifecycle card links as read-only across worker replacement and rejects rotated or foreign card capabilities', async () => {
+    const f = await fixture();
+    const session = f.sessions.get(SID_A)!;
+    const cardToken = deriveTerminalCardViewToken(SECRET, SID_A, 'current-epoch');
+    session.cardViewToken = cardToken;
+    session.viewToken = 'replacement-worker-view';
+
+    const response = await request(f, `?viewToken=${cardToken}&access=write`);
+    expect(response.status).toBe(200);
+    const cookie = response.headers.get('set-cookie')!.split(';', 1)[0];
+    expect(f.notifications).toHaveLength(1);
+    expect(f.notifications[0].scope).toBe('read');
+    expect(f.store.approve({ code: f.notifications[0].code, sessionId: SID_A, ownerId: OWNER }).ok).toBe(true);
+    const { first } = await openWs(f, cookie);
+    expect(first.claims.scope).toBe('read');
+    expect(await deniedWs(f, '?access=write', cookie)).toBe(403);
+    expect((await request(f, `?viewToken=${cardToken}`, cookie, SID_B)).status).toBe(403);
+
+    session.cardViewToken = deriveTerminalCardViewToken(SECRET, SID_A, 'resumed-epoch');
+    expect((await request(f, `?viewToken=${cardToken}`, cookie)).status).toBe(403);
+    expect((await request(f, `?viewToken=${session.cardViewToken}`, cookie)).status).toBe(303);
+  });
+
   it('serves pairing for an unpaired valid capability without resolving or contacting a worker', async () => {
     const f = await fixture();
     const pair = await beginPair(f, 'write');

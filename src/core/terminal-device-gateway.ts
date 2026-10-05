@@ -14,6 +14,8 @@ export interface TerminalDeviceSession {
   auditUserId?: string;
   writeToken: string | null;
   viewToken: string | null;
+  /** Current session-lifecycle capability used by Lark cards. */
+  cardViewToken?: string | null;
 }
 
 export interface TerminalDeviceGatewayOptions {
@@ -144,7 +146,10 @@ export class TerminalDeviceGateway {
     if (hasCapability) {
       // A view link can NEVER promote an existing device to operate permission.
       if (queryWrite && session.writeToken && safeTerminalTokenEqual(queryWrite, session.writeToken)) scope = 'write';
-      else if (queryRead && !queryWrite && session.viewToken && safeTerminalTokenEqual(queryRead, session.viewToken)) scope = 'read';
+      else if (queryRead && !queryWrite && (
+        (session.viewToken && safeTerminalTokenEqual(queryRead, session.viewToken))
+        || (session.cardViewToken && safeTerminalTokenEqual(queryRead, session.cardViewToken))
+      )) scope = 'read';
       else return response(403, '授权链接已失效，请从 Lark 取得当前会话的新链接。');
     }
     if (identity && identity.ownerId !== session.ownerId) {
