@@ -27646,7 +27646,7 @@ export async function startDaemon(botIndex?: number): Promise<void> {
         const ownerId = ds && getOwnerOpenId(ds.larkAppId);
         if (!ds || !ownerId) return null;
         const secret = loadDashboardSecret(join(homedir(), '.botmux', '.dashboard-secret'));
-        return { ownerId: terminalDeviceOwnerKey(ownerId), auditUserId: ownerId, writeToken: ds.workerToken ?? (secret ? deriveTerminalWriteToken(secret, sessionId) : null), viewToken: ds.workerViewToken ?? null };
+        return { ownerId: terminalDeviceOwnerKey(ownerId), auditUserId: ownerId, writeToken: ds.workerToken ?? (secret ? deriveTerminalWriteToken(secret, sessionId) : null), viewToken: ds.workerViewToken ?? null, cardViewToken: ds.workerCardViewToken ?? null };
       },
       notifyPairing: async (sessionId, code, scope) => {
         const ds = [...activeSessions.values()].find(current => current.larkAppId === cfg.larkAppId && current.session.sessionId === sessionId);
