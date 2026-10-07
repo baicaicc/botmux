@@ -145,7 +145,7 @@ const MANAGED_PANE = 'w_launch-1';
  *  is /bin/sh's script operand, never exec'd directly: macOS Gatekeeper holds
  *  and may SIGKILL a directly exec'd temp script (AIO-176). */
 function paneLauncherPath(): string {
-  const call = herdrCall('pane', 'run');
+  const call = findCall(a => a.includes('pane') && a.includes('run') && a.at(-1)?.startsWith('/bin/sh ') === true);
   expect(call).toHaveLength(6);
   expect(call!.slice(0, 5)).toEqual(['--session', SESSION, 'pane', 'run', MANAGED_PANE]);
   const command = call![5]!;
@@ -162,6 +162,9 @@ function setManagedLaunchResponses(kind: string, overrides: HerdrResponseHandler
     { match: a => a[0] === 'session' && a[1] === 'list', reply: () => EXISTING_SESSION_REPLY },
     { match: a => a.includes('workspace') && a.includes('create'), reply: () => WORKSPACE_CREATED_REPLY(MANAGED_WORKSPACE, MANAGED_PANE) },
     { match: a => a.includes('pane') && a.includes('run'), reply: () => '' },
+    { match: a => a.includes('pane') && a.includes('wait-output'), reply: a => JSON.stringify({
+      result: { matched_line: a[a.indexOf('--match') + 1] },
+    }) },
     {
       match: a => a.includes('agent') && a.includes('list'),
       reply: () => {
@@ -387,6 +390,51 @@ describe('HerdrBackend connection surface', () => {
 // ─── spawn(): fresh / existing / external ──────────────────────────────────
 
 describe('HerdrBackend.spawn', () => {
+  it('retries a damaged shell probe and launches the agent exactly once after execution is acknowledged', () => {
+    let probes = 0;
+    let waits = 0;
+    let acknowledged = false;
+    let probeCommand = '';
+    setManagedLaunchResponses('claude', [
+      { match: a => a.includes('pane') && a.includes('run'), reply: a => {
+        if (a.at(-1)?.startsWith('printf ')) {
+          probes++;
+          probeCommand = a.at(-1)!;
+        } else {
+          expect(acknowledged).toBe(true);
+        }
+        return '';
+      } },
+      { match: a => a.includes('wait-output'), reply: a => {
+        // A command echoed by the terminal is not an execution receipt.
+        expect(probeCommand).not.toContain(a[a.indexOf('--match') + 1]);
+        if (++waits === 1) return JSON.stringify({ error: { code: 'timeout' } });
+        acknowledged = true;
+        return JSON.stringify({ result: { matched_line: a[a.indexOf('--match') + 1] } });
+      } },
+    ]);
+    const be = new HerdrBackend(SESSION);
+    try {
+      be.spawn('claude', [], { cwd: '/work', cols: 80, rows: 24, env: {} });
+      expect(probes).toBe(2);
+      expect(mockedExecFileSync.mock.calls.filter(call =>
+        (call[1] as string[]).at(-1)?.startsWith('/bin/sh '))).toHaveLength(1);
+    } finally { be.kill(); }
+  });
+
+  it('rejects echoed or unmatched probe output without launching an agent and cleans up its workspace', () => {
+    setManagedLaunchResponses('claude', [{
+      match: a => a.includes('wait-output'),
+      reply: () => JSON.stringify({ result: { matched_line: 'printf command was only echoed' } }),
+    }]);
+    const be = new HerdrBackend(SESSION);
+    try {
+      expect(() => be.spawn('claude', [], { cwd: '/work', cols: 80, rows: 24, env: {} }))
+        .toThrow('agent was not launched');
+      expect(findCall(a => a.at(-1)?.startsWith('/bin/sh ') === true)).toBeUndefined();
+      expect(herdrCall('workspace', 'close', MANAGED_WORKSPACE)).toBeDefined();
+    } finally { be.kill(); }
+  });
   it('keeps provider secrets out of Herdr argv and quotes the private launcher environment', () => {
     const captured = setManagedLaunchResponses('claude');
     const secret = "token'\n$(touch /tmp/must-not-run)`whoami`";
@@ -479,7 +527,8 @@ describe('HerdrBackend.spawn', () => {
       .filter(call => call[0] === 'herdr' && (call[1] as string[])[0] === '--session')
       .map(call => (call[1] as string[]).slice(2, 4).join(' '));
     expect(operations).toEqual([
-      'workspace create', 'pane run', 'agent list', 'agent list', 'agent rename', 'agent get',
+      'workspace create', 'pane run', 'pane wait-output', 'pane run',
+      'agent list', 'agent list', 'agent rename', 'agent get',
     ]);
     expect(herdrCall('agent', 'start')).toBeUndefined();
     expect(existsSync(dirname(launcherPath))).toBe(false);
@@ -625,7 +674,8 @@ describe('HerdrBackend.spawn', () => {
     { operation: 'agent get', command: ['agent', 'get'], code: 'agent_not_found' },
   ])('Herdr 0.7.5: surfaces $operation failures and removes the new workspace and launcher', ({ command, code }) => {
     setManagedLaunchResponses('pi', [{
-      match: a => command.every(part => a.includes(part)),
+      match: a => command.every(part => a.includes(part))
+        && (command[0] !== 'pane' || a.at(-1)?.startsWith('/bin/sh ') === true),
       reply: () => JSON.stringify({ error: { code, message: 'managed launch failed' } }),
     }]);
     const be = new HerdrBackend(SESSION);
@@ -645,7 +695,8 @@ describe('HerdrBackend.spawn', () => {
   ])('Herdr 0.7.5: preserves stderr JSON when $operation exits with status 1 and empty stdout', ({ command, code }) => {
     const stderr = JSON.stringify({ error: { code, message: 'managed launch failed' } });
     setManagedLaunchResponses('pi', [{
-      match: a => command.every(part => a.includes(part)),
+      match: a => command.every(part => a.includes(part))
+        && (command[0] !== 'pane' || a.at(-1)?.startsWith('/bin/sh ') === true),
       reply: () => {
         throw Object.assign(new Error('Command failed: herdr'), { status: 1, stdout: '', stderr });
       },

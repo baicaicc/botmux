@@ -148,6 +148,33 @@ describe('HerdrBackend (e2e)', () => {
     }
   }, TEST_TIMEOUT);
 
+  it.skipIf(!HerdrBackend.isAvailable())('recovers when a new shell drops the first byte of its first command', async () => {
+    const shellLauncher = join(FIXTURE_ROOT, 'drop-first-byte');
+    const launchCount = join(FIXTURE_ROOT, 'launch-count');
+    // Reproduce startup typeahead loss deterministically, without depending
+    // on a particular shell theme or how quickly its rc files initialize.
+    writeFileSync(shellLauncher, `#!/bin/bash
+IFS= read -r first
+eval "\${first:1}"
+while IFS= read -r command; do eval "$command"; done
+`, { mode: 0o700 });
+    const originalConfig = readFileSync(FIXTURE_CONFIG, 'utf8');
+    const backend = new HerdrBackend(TEST_SESSION);
+    try {
+      writeFileSync(FIXTURE_CONFIG, `[terminal]\ndefault_shell = "${shellLauncher}"\nshell_mode = "non_login"\n`);
+      backend.spawn(FAKE_MANAGED_AGENT, ['-lc',
+        `echo launched >> '${launchCount}'; echo SHELL_READY_RECOVERED; sleep 30`,
+      ], spawnOpts());
+      await waitFor(() => backend.captureCurrentScreen().includes('SHELL_READY_RECOVERED'),
+        10_000, 'agent launched after the damaged first shell command');
+      expect(readFileSync(launchCount, 'utf8')).toBe('launched\n');
+      expect(HerdrBackend.hasAgent(TEST_SESSION, 'botmux')).toBe(true);
+    } finally {
+      backend.destroySession();
+      writeFileSync(FIXTURE_CONFIG, originalConfig);
+    }
+  }, TEST_TIMEOUT);
+
   it.skipIf(!HerdrBackend.isAvailable())('runs the quoted launcher even when shell rc prepends a decoy CLI to PATH', async () => {
     const decoyDir = join(FIXTURE_ROOT, 'decoy bin');
     const decoyCli = join(decoyDir, 'pi');

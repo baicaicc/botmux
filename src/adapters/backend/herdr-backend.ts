@@ -3,6 +3,7 @@ import type {HerdrWebTarget} from '../../utils/herdr-web-stream.js';
 import {codebuddySession} from '../../services/codebuddy-transcript.js';
 import {inspectHerdrKimiSource, inspectHerdrKimiOwner, type KimiNativeSource, type KimiNativeOwner} from '../../services/kimi-native-failure.js';
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, delimiter, dirname, isAbsolute, join } from 'node:path';
@@ -62,6 +63,7 @@ const STATUS_WAIT_TIMEOUT_MS = 30_000;
 // new pane. Input readiness remains gated by the worker's onAgentStatus hook.
 const PANE_AGENT_START_TIMEOUT_MS = 30_000;
 const PANE_AGENT_DETECTION_POLL_MS = 100;
+const SHELL_READY_TIMEOUT_MS = 5000;
 // Watch the full useful lifecycle, not just settled statuses. Herdr's status
 // waits are level-triggered: when the pane is already in X they succeed
 // immediately. After one status wins we therefore exclude it
@@ -215,6 +217,30 @@ function environmentForPaneAgent(bin: string, childEnv: Record<string, string> |
 function shellSingleQuote(value: string): string {
   if (value.includes('\0')) throw new Error('Herdr launch argument contains NUL');
   return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
+/** A new interactive shell can consume the first byte of typeahead while its
+ * rc files / line editor initialize. Prove that it executes a harmless command
+ * before sending the launcher; retry only the probe, never the agent command.
+ * Split the marker so terminal echo of the command cannot acknowledge it. */
+function waitForPaneShell(sessionName: string, paneId: string, env: NodeJS.ProcessEnv | undefined): void {
+  const nonce = randomUUID();
+  const marker = `botmux-shell-ready-${nonce}`;
+  const probe = `printf '%s%s\\n' 'botmux-shell-ready-' ${shellSingleQuote(nonce)}`;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    requiredJsonCommand(
+      `herdr shell readiness probe in ${paneId}`,
+      herdrSessionArgs(sessionName, ['pane', 'run', paneId, probe]),
+      { timeout: 5000, env, allowEmpty: true },
+    );
+    const acknowledged = tryJsonCommand(
+      herdrSessionArgs(sessionName, ['pane', 'wait-output', paneId, '--match', marker,
+        '--timeout', String(SHELL_READY_TIMEOUT_MS)]),
+      { timeout: SHELL_READY_TIMEOUT_MS + 1000, env },
+    );
+    if (acknowledged.ok && acknowledged.value?.result?.matched_line === marker) return;
+  }
+  throw new Error(`Herdr shell in pane ${paneId} did not execute the readiness probe; agent was not launched`);
 }
 
 /** Build a short-lived canonical launcher for Herdr's managed-agent facade.
@@ -978,6 +1004,7 @@ export class HerdrBackend implements SessionBackend {
       }
 
       launcher = createPaneAgentLauncher(basename(cliBin), bin, args, workspaceEnv);
+      waitForPaneShell(this.sessionName, paneId, this.childEnv);
       requiredJsonCommand(
         `herdr pane run ${paneId} in ${this.sessionName}`,
         // One COMMAND argument reaches the shell verbatim, even while it is
