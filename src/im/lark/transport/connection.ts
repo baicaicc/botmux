@@ -3,8 +3,12 @@ import { describeLarkWsProxy, describeWsRuntime, larkWsAgentFor, resolveLarkWsPr
 import { logger } from '../../../utils/logger.js';
 import { type Brand, sdkDomain } from '../lark-hosts.js';
 
+/** 连接持续不健康的兜底窗口：超过即整轮重启 WSClient（见下方 ② 注释）。 */
+const STUCK_REVIVE_MS = 5 * 60_000;
+
 /**
- * Start the SDK connection and its failed-state recovery watchdog.
+ * Start the SDK connection and its recovery watchdog (terminal 'failed', plus
+ * any state that stays unhealthy past STUCK_REVIVE_MS).
  * The caller owns event registration and business dispatch; this module only
  * passes the supplied dispatcher to the SDK. Returns the original SDK client.
  */
@@ -55,16 +59,30 @@ export function startLarkConnection(
   // ② SDK 重连耗尽后停在 terminalError（getConnectionStatus().state === 'failed'）并
   //    永久放弃。每分钟探测一次，发现已放弃就 start() 重新发起一轮全新握手 —— start()
   //    会清掉 terminalError 并重新 pullConnectConfig + connect，无需手动重启 daemon。
-  //    只在 'failed' 时介入，不打断 SDK 正在进行的 'reconnecting' / 'connecting'。
+  //    'failed' 立即介入；其余状态先给 SDK 五分钟自愈窗口（正常退避重连不会被误杀，
+  //    不打断进行中的 'reconnecting' / 'connecting'），超时仍不 connected 就视为静默
+  //    卡死 —— 服务端持续拒绝 endpoint 分配（如 internal error）、退避被反复拉长、
+  //    状态机看似活着但 Bot 实际失聪 —— 同样整轮重来。
   let reviving = false;
+  let lastHealthyAt = Date.now();
   const reviveTimer = setInterval(() => {
     if (reviving) return;
-    if (wsClient.getConnectionStatus().state !== 'failed') return;
+    const status = wsClient.getConnectionStatus();
+    if (status.state === 'connected') {
+      lastHealthyAt = Date.now();
+      return;
+    }
+    const exhausted = status.state === 'failed';
+    const stuck = Date.now() - lastHealthyAt >= STUCK_REVIVE_MS;
+    if (!exhausted && !stuck) return;
     reviving = true;
-    logger.warn(`[ws] ${larkAppId} connection failed (reconnect exhausted, proxy=${wsProxyDesc} runtime=${describeWsRuntime()}), restarting WSClient`);
+    const reason = exhausted
+      ? 'connection failed (reconnect exhausted)'
+      : `no healthy connection for ${Math.round((Date.now() - lastHealthyAt) / 1000)}s`;
+    logger.warn(`[ws] ${larkAppId} ${reason} (state=${status.state}, attempts=${status.reconnectAttempts}, proxy=${wsProxyDesc} runtime=${describeWsRuntime()}), restarting WSClient`);
     wsClient.start({ eventDispatcher })
       .catch(err => logger.error(`[ws] ${larkAppId} WSClient restart failed: ${err?.message ?? err}`))
-      .finally(() => { reviving = false; });
+      .finally(() => { reviving = false; lastHealthyAt = Date.now(); });
   }, 60_000);
   reviveTimer.unref();
 

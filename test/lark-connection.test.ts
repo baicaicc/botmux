@@ -92,6 +92,33 @@ describe('startLarkConnection — lifecycle', () => {
     expect(client.start).toHaveBeenCalledTimes(1);
   });
 
+  it('restarts a stuck non-connected state once it outlives the silence window', async () => {
+    const client = startLarkConnection('app-test', 'secret', eventDispatcher);
+    // A server that keeps rejecting the endpoint allocation leaves the SDK in
+    // 'reconnecting' with growing backoff — alive on paper, deaf in practice.
+    vi.mocked(client.getConnectionStatus).mockReturnValue({ state: 'reconnecting', reconnectAttempts: 41 });
+    await probeRecovery();
+    expect(client.start).toHaveBeenCalledTimes(1);
+    const realNow = Date.now();
+    vi.spyOn(Date, 'now').mockReturnValue(realNow + 6 * 60_000);
+    await probeRecovery();
+    expect(client.start).toHaveBeenCalledTimes(2);
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/^\[ws\] app-test no healthy connection for \d+s \(state=reconnecting, attempts=41, proxy=.+ runtime=.+\), restarting WSClient$/));
+    expect(client.start).toHaveBeenLastCalledWith({ eventDispatcher });
+    // The window restarts with the fresh handshake; the next healthy probe resets it.
+    vi.mocked(client.getConnectionStatus).mockReturnValue({ state: 'connected', reconnectAttempts: 0 });
+    await probeRecovery();
+    expect(client.start).toHaveBeenCalledTimes(2);
+  });
+
+  it('still restarts a failed state immediately, inside the silence window', async () => {
+    const client = startLarkConnection('app-test', 'secret', eventDispatcher);
+    vi.mocked(client.getConnectionStatus).mockReturnValue({ state: 'failed', reconnectAttempts: 3 });
+    await probeRecovery();
+    expect(client.start).toHaveBeenCalledTimes(2);
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/^\[ws\] app-test connection failed \(reconnect exhausted\) \(state=.+, attempts=.+, proxy=.+ runtime=.+\), restarting WSClient$/));
+  });
+
   it('restarts a failed connection with the same dispatcher and does not overlap pending recovery', async () => {
     const client = startLarkConnection('app-test', 'secret', eventDispatcher);
     vi.mocked(client.getConnectionStatus).mockReturnValue({ state: 'failed', reconnectAttempts: 3 });
@@ -99,7 +126,7 @@ describe('startLarkConnection — lifecycle', () => {
     vi.mocked(client.start).mockImplementationOnce(() => new Promise<void>(resolve => { finish = resolve; }));
     await probeRecovery();
     expect(client.start).toHaveBeenCalledTimes(2);
-    expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/^\[ws\] app-test connection failed \(reconnect exhausted, proxy=.+ runtime=.+\), restarting WSClient$/));
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/^\[ws\] app-test connection failed \(reconnect exhausted\) \(state=.+, attempts=.+, proxy=.+ runtime=.+\), restarting WSClient$/));
     expect(client.start).toHaveBeenLastCalledWith({ eventDispatcher });
     await probeRecovery();
     expect(client.start).toHaveBeenCalledTimes(2);
