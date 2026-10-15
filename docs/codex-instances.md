@@ -73,6 +73,8 @@ cli_auth_credentials_store = "file"
 
 tmux 保存非敏感 binding/runtime identity；恢复发现标记不一致或丢失时暂停，保留原 pane，不自动杀掉它。`/status` 和 Dashboard 显示实例 ID / source，完整 home 只在本机检查中显示。
 
+Linux 首次启动尚无 tmux server 时，身份预检仅在 socket 路径和内核绑定都确认不存在后允许继续创建。连接拒绝、超时或活 server 的 socket 被删除仍保留拒绝保护；并发创建出现新 socket 时只重查一次正常会话状态与身份。
+
 关闭功能不等于可安全降级旧二进制：旧版本不识别绑定，会错误恢复到全局目录。需保留 binding 读取能力，或先受控停用/隔离所有实例会话并备份。
 
 ## 验证边界
