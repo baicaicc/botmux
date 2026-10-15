@@ -397,6 +397,12 @@ export class TmuxPipeBackend implements SessionBackend {
   /** spawn() sets up the pipe-pane subscription + fifo reader. In managed
    *  mode it first creates a detached bmx-* tmux session that runs the CLI. */
   spawn(bin: string, args: string[], opts: SpawnOpts): void {
+    const instanceIdentity = opts.env?.BOTMUX_CODEX_INSTANCE_BINDING;
+    if (this.ownsSession && !this.createSession && instanceIdentity) {
+      // Fence managed reattachment before options or pipe-pane can touch the
+      // existing session. User-owned adopted panes need no Botmux marker.
+      TmuxBackend.assertInstanceIdentity(this.paneTarget, instanceIdentity);
+    }
     // Self-heal a server polluted by a pre-upgrade botmux before we touch it
     // (once per daemon process; no-op on a server this build booted clean).
     // TmuxPipeBackend is the live backend on this path, so the scrub must be
@@ -1110,6 +1116,7 @@ export class TmuxPipeBackend implements SessionBackend {
   }
 
   private createDetachedSession(bin: string, args: string[], opts: SpawnOpts): void {
+    const instanceIdentity = opts.env?.BOTMUX_CODEX_INSTANCE_BINDING;
     const shellSpec = resolveUserShell(process.env, opts.launchShell);
     const envAssignments = buildBotmuxEnvAssignments(opts.env, opts.injectEnv);
     const script = shellWrapperScript(
@@ -1122,6 +1129,7 @@ export class TmuxPipeBackend implements SessionBackend {
       '-s', this.paneTarget,
       '-x', String(opts.cols),
       '-y', String(opts.rows),
+      ...(instanceIdentity ? ['-e', `BOTMUX_CODEX_INSTANCE_BINDING=${instanceIdentity}`] : []),
       '--',
       ...shellCommandArgv(shellSpec, script, [
         opts.cwd,
@@ -1154,6 +1162,9 @@ export class TmuxPipeBackend implements SessionBackend {
         startupRetrySleepFn(STARTUP_TMUX_RETRY_DELAYS_MS[attempt]);
       }
     }
+    // A duplicate on retry may be a timed-out create, or a concurrent creator.
+    // Verify the actual binding before changing options or subscribing output.
+    if (instanceIdentity) TmuxBackend.assertInstanceIdentity(this.paneTarget, instanceIdentity);
     this.applySessionOptions();
   }
 
