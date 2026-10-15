@@ -2,9 +2,10 @@ import { describe, expect, it, vi } from 'vitest';
 import { dirname, join } from 'node:path';
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { normalizeKllConfig, resolveKllLaunch, validateKllLaunch, validateKllExtraArgs } from '../src/services/kll-launch.js';
+import { normalizeKllConfig, resolveKllLaunch, validateKllLaunch, validateKllExtraArgs, applyKllLaunchArgs } from '../src/services/kll-launch.js';
 import { resolveSessionLaunchModel } from '../src/core/session-model.js';
 import { createClaudeCodeAdapter } from '../src/adapters/cli/claude-code.js';
+import { createCodexAdapter } from '../src/adapters/cli/codex.js';
 
 const result = { schemaVersion: 1, agent: 'claude-code', modelId: 'glm5.3', profileRef: { id: 'profile-glm' }, cliModel: 'glm-5.3', launch: { removeEnv: ['ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPIC_BASE_URL'] } };
 const input = { kll: { tier: 'strong' as const }, cliId: 'claude-code', backendType: 'herdr' };
@@ -75,6 +76,42 @@ describe('KLL native launch selection', () => {
     const selected = resolveKllLaunch({ ...input, cliId: 'codex' }, fake)!;
     expect(selected.model).toBeUndefined();
     expect(fake.execute.mock.calls[0][1][1]).toBe('codex');
+  });
+  it('delivers v2 provider configuration to native Codex before resume without changing native identity', () => {
+    const providerArgs = ['--no-daemon', '--config', 'model_provider="kll_astergate"', '--config',
+      'model_providers.kll_astergate={name="AsterGate",base_url="https://gateway.example/v1",env_key="ASTERGATE_API_KEY",wire_api="responses"}'];
+    const fake = resolver({ ...result, schemaVersion: 2, agent: 'codex-herdr', modelId: 'astergate/GPT-test',
+      profileRef: { id: 'gateway-test' }, cliModel: 'GPT-test', launch: { removeEnv: ['ASTERGATE_API_KEY'], args: providerArgs } },
+    { ASTERGATE_API_KEY: 'gateway-secret' });
+    const cfg = { ...input, cliId: 'codex' };
+    const selected = resolveKllLaunch(cfg, fake)!;
+    const adapter = createCodexAdapter('/native/codex');
+    const nativeArgs = adapter.buildArgs({ sessionId: 'bot-session', resume: true, resumeSessionId: 'native-session',
+      workingDir: '/tmp', model: selected.model });
+    const args = applyKllLaunchArgs(nativeArgs, selected);
+    expect(args.indexOf('model_provider="kll_astergate"')).toBeLessThan(args.indexOf('resume'));
+    expect(args).toContain('native-session'); expect(args).toContain('GPT-test');
+    expect(args.join(' ')).not.toContain('gateway-secret');
+    expect(selected.env.ASTERGATE_API_KEY).toBe('gateway-secret');
+    expect(selected.env.CODEX_HOME).toBeUndefined();
+    expect(adapter.id).toBe('codex'); expect(fake.cleaned()).toBe(true);
+    for (const flags of [['-c', 'model_provider="openai"'], ['--config=model="other"'], ['-p', 'other'], ['--oss']]) {
+      expect(() => validateKllExtraArgs(cfg, flags, selected)).toThrow('cannot be overridden');
+    }
+    expect(() => validateKllExtraArgs(cfg, ['-c', 'model_reasoning_effort="high"'], selected)).not.toThrow();
+    expect(applyKllLaunchArgs(nativeArgs)).toBe(nativeArgs);
+  });
+  it('rejects unversioned, malformed, non-Codex and credential-bearing provider arguments', () => {
+    for (const response of [
+      { ...result, launch: { ...result.launch, args: ['--config', 'model_provider="x"'] } },
+      { ...result, schemaVersion: 2, launch: { ...result.launch, args: ['--config', 'model_provider="x"'] } },
+      { ...result, schemaVersion: 2, agent: 'codex-herdr', launch: { ...result.launch, args: ['--remote', 'ws://foreign'] } },
+      { ...result, schemaVersion: 2, agent: 'codex-herdr', launch: { ...result.launch, args: ['--config', 'model_provider="gateway-secret"'] } },
+    ]) {
+      const fake = resolver(response, { ASTERGATE_API_KEY: 'gateway-secret' });
+      expect(() => resolveKllLaunch({ ...input, cliId: response.agent === 'codex-herdr' ? 'codex' : 'claude-code' }, fake)).toThrow();
+      expect(fake.cleaned()).toBe(true);
+    }
   });
   it('maps dsh onto the harness catalog route and keeps credentials env-only', () => {
     const fake = resolver(dshResult, { ALLINONE_DSH_API_KEY: 'dsh-secret', DSH_HOME: '/allinone/.runtime/dsh-home' });
