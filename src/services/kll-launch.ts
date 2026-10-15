@@ -52,10 +52,23 @@ export function validateKllLaunch(input: LaunchInput): void {
 }
 
 /** KLL owns launch-time model/provider settings; retain unrelated CLI flags. */
-export function validateKllExtraArgs(input: LaunchInput, args: string[]): void {
+export function validateKllExtraArgs(input: LaunchInput, args: string[], resolution?: KllLaunchResolution): void {
   if (!input.kll || input.adoptMode) return;
   if (args.some(arg => /^(?:--model|--settings)(?:=|$)/.test(arg) || /^-m/.test(arg))) {
     throw new Error('KLL launch model and settings cannot be overridden by CLI_EXTRA_ARGS');
+  }
+  if (input.cliId === 'codex' && resolution?.args.length) {
+    for (let i = 0; i < args.length; i++) {
+      const arg = args[i];
+      if (/^(--(?:oss|local-provider|profile|remote)(?:=|$)|-p)/.test(arg)) {
+        throw new Error('KLL launch provider cannot be overridden by CLI_EXTRA_ARGS');
+      }
+      const value = arg === '-c' || arg === '--config' ? args[++i]
+        : arg.startsWith('--config=') ? arg.slice(9) : arg.startsWith('-c') ? arg.slice(2) : undefined;
+      if (value && /^(model|model_provider|model_providers|profile|profiles|model_catalog_json|openai_base_url)(\s*=|\.)/.test(value.trim())) {
+        throw new Error('KLL launch provider cannot be overridden by CLI_EXTRA_ARGS');
+      }
+    }
   }
 }
 
@@ -65,7 +78,16 @@ export type KllLaunchResolution = {
   model: string | undefined;
   env: Record<string, string>;
   removeEnv: string[];
+  /** Non-secret native provider overrides. Version 2 requires consumption. */
+  args: string[];
 };
+
+export function applyKllLaunchArgs(args: string[], resolution?: KllLaunchResolution): string[] {
+  // Config flags belong before a Codex resume/fork subcommand, just like the
+  // native adapter's other process-level overrides.
+  if (resolution?.args.length) args.unshift(...resolution.args);
+  return args;
+}
 
 type ExecuteResolver = (bin: string, args: string[], env: NodeJS.ProcessEnv) => string;
 const executeResolver: ExecuteResolver = (bin, args, env) => execFileSync(bin, args, {
@@ -108,7 +130,7 @@ export function resolveKllLaunch(
     // the dsh runner route dsh-harness; BotMux keeps its native adapter/session
     // identity throughout.
     const expectedAgent = input.cliId === 'codex' ? 'codex-herdr' : input.cliId === 'dsh' ? 'dsh-harness' : input.cliId;
-    if (result?.schemaVersion !== 1 || result.agent !== expectedAgent
+    if (![1, 2].includes(result?.schemaVersion) || result.agent !== expectedAgent
         || typeof result.modelId !== 'string' || !result.modelId
         || typeof result.profileRef?.id !== 'string' || !result.profileRef.id
         || (result.cliModel !== null && (typeof result.cliModel !== 'string' || !result.cliModel))
@@ -117,6 +139,24 @@ export function resolveKllLaunch(
         || !values || typeof values !== 'object' || Array.isArray(values)
         || !Object.entries(values).every(([key, value]) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(key) && typeof value === 'string' && !value.includes('\0'))) {
       throw new Error('KLL returned an incompatible launch contract');
+    }
+    let providerArgs: string[] = [];
+    if (result.schemaVersion === 2) {
+      providerArgs = result.launch.args;
+      const configArgs = Array.isArray(providerArgs) && providerArgs[0] === '--no-daemon' ? providerArgs.slice(1) : providerArgs;
+      if (input.cliId !== 'codex' || !Array.isArray(providerArgs) || !providerArgs.length
+          || providerArgs.length > 33 || !Array.isArray(configArgs) || !configArgs.length || configArgs.length % 2 !== 0
+          || !configArgs.every((value: unknown, index: number) => typeof value === 'string'
+            && !value.includes('\0') && (index % 2 === 0 ? value === '--config'
+              : /^(model|model_provider|model_providers\.[a-z0-9_-]+)=/.test(value)))) {
+        throw new Error('KLL returned an incompatible launch contract');
+      }
+      const secrets = Object.entries(values).filter(([key]) => /KEY|TOKEN|SECRET/.test(key)).map(([, value]) => value as string).filter(Boolean);
+      if (providerArgs.some(arg => secrets.some(secret => arg.includes(secret)))) {
+        throw new Error('KLL provider arguments must not contain credentials');
+      }
+    } else if (result.launch.args !== undefined) {
+      throw new Error('KLL provider arguments require launch contract version 2');
     }
     // dsh routes are per-model: without a native cliModel the runner would fall
     // back to the profile's own provider default, which KLL must never do.
@@ -151,7 +191,7 @@ export function resolveKllLaunch(
     const sanitized = sanitizePerBotEnv(overrides);
     if (Object.keys(sanitized).length !== Object.keys(overrides).length) throw new Error('KLL environment contains reserved session variables');
     Object.assign(env, sanitized);
-    return { modelId: result.modelId, profileId: result.profileRef.id, model: result.cliModel ?? undefined, env, removeEnv: [...removeEnv] };
+    return { modelId: result.modelId, profileId: result.profileRef.id, model: result.cliModel ?? undefined, env, removeEnv: [...removeEnv], args: providerArgs };
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

@@ -130,7 +130,7 @@ import { remoteWorkerShutdownInputBlocker } from './core/remote-worker-shutdown-
 import { ReadyGate, shouldArmReadyGate } from './utils/ready-gate.js';
 import { shouldRunStartupCommandsOnSpawn, shouldDeferInitialPromptForStartup } from './core/startup-commands.js';
 import { sanitizePerBotEnv } from './core/per-bot-env.js';
-import { resolveKllLaunch, validateKllLaunch, validateKllExtraArgs } from './services/kll-launch.js';
+import { resolveKllLaunch, validateKllLaunch, validateKllExtraArgs, applyKllLaunchArgs } from './services/kll-launch.js';
 import { cliModelSupportsReasoningEffort } from './services/codex-reasoning-effort.js';
 import { normalizeExistingAppServerEndpoint } from './core/existing-app-server.js';
 import { resolveChildBotsConfig } from './core/config-dir.js';
@@ -16069,9 +16069,10 @@ async function spawnCli(
     log(`Ignoring CLI_EXTRA_ARGS for fixed-contract adapter ${cliAdapter.id}`);
   }
   if (cliExtraArgs.length) {
-    if (kllLaunch) validateKllExtraArgs(cfg, cliExtraArgs);
+    if (kllLaunch) validateKllExtraArgs(cfg, cliExtraArgs, kllLaunch);
     args.push(...cliExtraArgs);
   }
+  applyKllLaunchArgs(args, kllLaunch);
 
   // Claude Code 在 root/sudo 下会拒绝 --dangerously-skip-permissions 并立即 exit。
   // botmux 必须带这个 flag（话题里没法弹交互式审批），所以为 root 自动注入
