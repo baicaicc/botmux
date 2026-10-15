@@ -186,7 +186,7 @@ import { botInjectedEnv, buildSessionChildEnv } from './core/env-policy.js';
 import { envPolicyRequiresColdStart, readEnvPolicyStamp, writeEnvPolicyStamp } from './services/env-policy-stamp.js';
 import { writeSessionEnvStamp } from './services/session-env-stamp.js';
 import { cliModelSupportsReasoningEffort } from './services/codex-reasoning-effort.js';
-import { resolveKllLaunch, validateKllLaunch, validateKllExtraArgs } from './services/kll-launch.js';
+import { resolveKllLaunch, validateKllLaunch, validateKllExtraArgs, applyKllLaunchArgs } from './services/kll-launch.js';
 import { normalizeExistingAppServerEndpoint } from './core/existing-app-server.js';
 import { resolveChildBotsConfig } from './core/config-dir.js';
 import {
@@ -22300,8 +22300,12 @@ async function spawnCli(
     log(`Ignoring CLI_EXTRA_ARGS for fixed-contract adapter ${cliAdapter.id}`);
   }
   // KLL（fork 自有）：本地选择器激活时禁止 CLI_EXTRA_ARGS 覆盖模型/设置。
-  if (kllLaunch) validateKllExtraArgs(cfg, cliExtraArgs);
-  if (cliExtraArgs.length) args.push(...cliExtraArgs);
+  if (cliExtraArgs.length) {
+    if (kllLaunch) validateKllExtraArgs(cfg, cliExtraArgs, kllLaunch);
+    args.push(...cliExtraArgs);
+  }
+  // KLL（fork 自有）：网关启动配置（provider/model/credentials overlay）落到启动参数。
+  applyKllLaunchArgs(args, kllLaunch);
 
   // Claude Code 在 root/sudo 下会拒绝 --dangerously-skip-permissions 并立即 exit。
   // botmux 必须带这个 flag（话题里没法弹交互式审批），所以为 root 自动注入
