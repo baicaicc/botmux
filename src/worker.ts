@@ -19645,7 +19645,8 @@ body{display:flex;flex-direction:column;height:100vh;height:100dvh}
 body.touch #terminal .xterm-screen,
 body.touch #terminal .xterm-screen *{
   -webkit-user-select:none;user-select:none;-webkit-touch-callout:none;touch-action:pinch-zoom}
-#status{position:fixed;top:8px;right:12px;z-index:10;font:12px monospace;
+#status{position:fixed;top:42px;right:12px;z-index:61;font:12px monospace;
+  max-width:calc(100% - 24px);white-space:pre-wrap;overflow-wrap:anywhere;
   color:#565f89;background:#1a1b26cc;padding:2px 8px;border-radius:4px}
 #status.ok{color:#9ece6a}
 #status.err{color:#f7768e}
@@ -19768,8 +19769,23 @@ ${loginUrl ? `<a id="login-banner" href="${loginUrl}" target="_top" rel="noopene
     <button id="mobile-send" type="submit">上屏</button>
   </div>
 </form>
-<div id="status" class="err">connecting...</div>
+<div id="status" class="err" role="status">加载终端组件…</div>
 ${process.env.BOTMUX_TERMINAL_DEVICE_PAIRING === '1' ? '<a id="device-authorization" href="./_device/settings" style="position:fixed;right:8px;top:8px;z-index:60;color:#ddd;background:#222;padding:4px 8px;border-radius:6px;text-decoration:none">设备授权</a>' : ''}
+<script>
+// Install before external scripts: a missing dependency otherwise leaves a
+// blank terminal with the initial connecting label and no visible explanation.
+window.addEventListener('error',function(event){
+  var status=document.getElementById('status');
+  if(!status)return;
+  var target=event.target;
+  if(target&&target.tagName==='SCRIPT'&&target.src){
+    status.textContent='终端组件加载失败：'+target.src.split('/').pop();
+  }else if(event.message){
+    status.textContent='终端页面错误：'+event.message;
+  }else{return;}
+  status.className='err';
+},true);
+</script>
 <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-web-links@0.11.0/lib/addon-web-links.min.js"></script>
@@ -19836,6 +19852,7 @@ function _wbTerminalWidth(){
   // 返回 0，_wbAutoFontSize 保持基准字号，等尺寸事件到了再纠正。
   return window.innerWidth||0;
 }
+document.getElementById('status').textContent='初始化终端…';
 var term=new Terminal({
   theme:{background:'#1a1b26',foreground:'#a9b1d6',cursor:'#c0caf5',
     selectionBackground:'#33467c',black:'#15161e',red:'#f7768e',
@@ -20120,6 +20137,18 @@ if(hasToken && !/[?&]imefix=0\\b/.test(location.search)){(function(){
 
 // ── WebSocket ──
 var ws_=null,el=document.getElementById('status');
+el.textContent='connecting...';
+var _wbReceivedBytes=0,_wbStatusUpdatePending=false,_wbByteEncoder=new TextEncoder();
+function _wbConnectionStatus(){
+  if(!ws_||ws_.readyState!==1)return;
+  el.textContent='connected · 已接收 '+Math.round(_wbReceivedBytes/1024)+' KB';
+}
+function _wbRecordOutput(data){
+  _wbReceivedBytes+=typeof data==='string'?_wbByteEncoder.encode(data).length:data.byteLength;
+  if(_wbStatusUpdatePending)return;
+  _wbStatusUpdatePending=true;
+  setTimeout(function(){_wbStatusUpdatePending=false;_wbConnectionStatus()},250);
+}
 function _sendInput(d){if(ws_&&ws_.readyState===1)ws_.send(JSON.stringify({type:'input',data:d}))}
 // Pure pointer-motion reports (SGR button code 35 + shift/alt/ctrl modifier
 // bits). Emitted by xterm once the seed re-asserts DECSET 1003 (grok build) —
@@ -20261,7 +20290,7 @@ if(typeof ResizeObserver!=='undefined'){
   // restart). If we never re-send our real grid, the PTY stays 160 while this
   // xterm renders narrower, and Claude's height-relative redraws drift a row
   // (status-line update bleeds into the line below). Always re-assert size.
-  ws.onopen=function(){clearTimeout(openTimer);el.textContent='connected';el.className='ok';_lastC=_lastR=0;sendResize()};
+  ws.onopen=function(){clearTimeout(openTimer);el.textContent='connected';el.className='ok';_lastC=_lastR=0;sendResize();_wbConnectionStatus()};
   ws.onmessage=function(e){
     // 带外控制帧只可能是**本连接的第一帧**，而且必须整帧精确匹配（见页面顶部
     // _wbDecodeWriteFrame 那段注释）。首帧一旦消费掉，这条连接上之后的每一个字节
@@ -20271,6 +20300,7 @@ if(typeof ResizeObserver!=='undefined'){
       var _ctl=_wbDecodeWriteFrame(e.data,true);
       if(_ctl!==null){_wbSetWsWrite(_ctl);return;}
     }
+    _wbRecordOutput(e.data);
     var data=typeof e.data==='string'?e.data:new TextDecoder().decode(e.data);
     // Snapshot-aware Herdr history replaces the buffer instead of appending a
     // mostly-overlapping full screen. Preserve the reader's anchor when older
