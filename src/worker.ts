@@ -20141,7 +20141,8 @@ el.textContent='connecting...';
 var _wbReceivedBytes=0,_wbStatusUpdatePending=false,_wbByteEncoder=new TextEncoder();
 function _wbConnectionStatus(){
   if(!ws_||ws_.readyState!==1)return;
-  el.textContent='connected · 已接收 '+Math.round(_wbReceivedBytes/1024)+' KB';
+  var size=_wbReceivedBytes<1024?_wbReceivedBytes+' B':(_wbReceivedBytes/1024).toFixed(1)+' KB';
+  el.textContent='connected · 已接收 '+size;
 }
 function _wbRecordOutput(data){
   _wbReceivedBytes+=typeof data==='string'?_wbByteEncoder.encode(data).length:data.byteLength;
