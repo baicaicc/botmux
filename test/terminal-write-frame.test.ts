@@ -110,8 +110,9 @@ describe('worker 终端页的跨文件接缝', () => {
   it('ws.onclose 当下就把写权限退回未知并上抛（重连中不再停留在旧判定）', () => {
     // 关闭那一刻就 reset，不能等 2 秒后的 connect() 才退回未知：否则断线到重连的
     // 空窗里，终端页仍以上一条连接的 wsHasWrite 放行输入，父页也还显示旧的可写判定。
-    const at = worker.search(/ws\.onclose=function\([^)]*\)\{/);
+    const at = worker.indexOf('function disconnected(e,reason){');
     expect(at, 'worker.ts 里应有 ws.onclose 处理器').toBeGreaterThan(-1);
+    expect(worker).toContain('ws.onclose=disconnected;');
     const body = worker.slice(at, worker.indexOf('}', at) + 1);
     expect(body).toContain('_wbSetWsWrite(null)');
     // 且必须等新连接的新首帧才恢复——onclose 先把首帧标志复位。
@@ -119,11 +120,11 @@ describe('worker 终端页的跨文件接缝', () => {
   });
 
   it('原生连接失败显示原因并停止重连；普通网络断开继续重连', () => {
-    const start = worker.indexOf('ws.onclose=') + 'ws.onclose='.length;
-    const end = worker.indexOf('\n  };', start) + '\n  }'.length;
+    const start = worker.indexOf('function disconnected(e,reason){');
+    const end = worker.indexOf('\n  ws.onclose=disconnected;', start);
     const handler = worker.slice(start, end).replace('${HERDR_WEB_CONTROL_FAILED}', '4409');
     const invoke = new Function('event', 'el', '_wbSetWsWrite', 'setTimeout', 'connect',
-      `var ws_={},_wbFirstFrame=false,_wbHideBytes=()=>{};(${handler})(event);return {ws_,_wbFirstFrame};`);
+      `var ws_={},ended=false,openTimer,firstFrameTimer,_wbFirstFrame=false,_wbHideBytes=()=>{};(${handler})(event);return {ws_,_wbFirstFrame};`);
     const el = {textContent: '', className: '', title: ''};
     const write = vi.fn(), timeout = vi.fn(), connect = vi.fn();
     expect(invoke({code: 4409, reason: '操作权被占用'}, el, write, timeout, connect))

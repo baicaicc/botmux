@@ -27427,7 +27427,11 @@ function _wbHideBytes(){if(_wbBytesEl)_wbBytesEl.classList.remove('show');}
 // 每次（重）连都从 0 重新累计：上一条连接收到的字节不能算进新连接。
 function _wbResetBytes(){_wbReceivedBytes=0;_wbStatusUpdatePending=false;_wbHideBytes();}
 function _wbRecordOutput(data){
+  var firstOutput=_wbReceivedBytes===0;
   _wbReceivedBytes+=typeof data==='string'?_wbByteEncoder.encode(data).length:data.byteLength;
+  // Report the first output before xterm parses/renders it. A delayed status
+  // timer must not make a busy renderer look like a stream receiving no data.
+  if(firstOutput&&_wbReceivedBytes){_wbConnectionStatus();return;}
   if(_wbStatusUpdatePending)return;
   _wbStatusUpdatePending=true;
   setTimeout(function(){_wbStatusUpdatePending=false;_wbConnectionStatus()},250);
@@ -27563,7 +27567,14 @@ if(typeof ResizeObserver!=='undefined'){
   // Guard against a hung CONNECTING state (proxy/network black hole): if the
   // socket never opens, close it so onclose retries instead of leaving the
   // user staring at "connecting" forever.
-  var openTimer=setTimeout(function(){try{ws.close()}catch(e){}},10000);
+  // fork 自有：ended/firstFrameTimer 守卫——OPEN 后 10s 内未见 worker 权限判定即本地重试，
+  // 关闭握手本身挂死也不会让页面永远停在旧连接状态。
+  var ended=false,firstFrameTimer;
+  function retry(reason){
+    el.textContent=reason;
+    try{ws.close()}catch(e){}
+  }
+  var openTimer=setTimeout(function(){retry('连接超时，正在重连…')},10000);
   // 新连接 = 新的一次鉴权。上一条连接拿到的权限说明不了这一条，先退回未知（并把这
   // 个「未知」上抛给嵌入方），等这条连接自己的首帧说话。
   _wbFirstFrame=true;
@@ -27577,15 +27588,23 @@ if(typeof ResizeObserver!=='undefined'){
   // (status-line update bleeds into the line below). Always re-assert size.
   // 连接建立 = 启动期结束：摘掉启动专用 error 监听，之后页面（ResizeObserver 等）
   // 的良性报错不许再把健康状态刷红；状态词由这里唯一写成 connected。
-  ws.onopen=function(){clearTimeout(openTimer);window.removeEventListener('error',_wbBootstrapError,true);el.textContent='connected';el.className='ok';_lastC=_lastR=0;sendResize();_wbConnectionStatus()};
+  ws.onopen=function(){
+    if(ended)return;
+    clearTimeout(openTimer);
+    // fork 自有：OPEN 只确认升级完成，还要求 worker 的权限判定帧；10s 未到则本地重连。
+    firstFrameTimer=setTimeout(function(){retry('终端响应超时，正在重连…')},10000);
+    window.removeEventListener('error',_wbBootstrapError,true);el.textContent='connected';el.className='ok';_lastC=_lastR=0;sendResize();_wbConnectionStatus();
+  };
   ws.onmessage=function(e){
+    if(ended)return;
     // 带外控制帧只可能是**本连接的第一帧**，而且必须整帧精确匹配（见页面顶部
     // _wbDecodeWriteFrame 那段注释）。首帧一旦消费掉，这条连接上之后的每一个字节
     // 就都只是 PTY 输出 —— 里面的进程再怎么打印控制帧的字面量也翻不动权限。
     if(_wbFirstFrame){
+      clearTimeout(firstFrameTimer);
       _wbFirstFrame=false;
       var _ctl=_wbDecodeWriteFrame(e.data,true);
-      if(_ctl!==null){_wbSetWsWrite(_ctl);return;}
+      if(_ctl!==null){_wbSetWsWrite(_ctl);_wbConnectionStatus();return;}
     }
     _wbRecordOutput(e.data);
     var data=typeof e.data==='string'?e.data:new TextDecoder().decode(e.data);
@@ -27647,6 +27666,9 @@ if(typeof ResizeObserver!=='undefined'){
     term.write(data,_settleInitialBottom);
   };
   ws.onclose=function(e){
+    if(ended)return; ended=true;
+    clearTimeout(openTimer);clearTimeout(firstFrameTimer);
+    ws.onopen=ws.onmessage=ws.onclose=ws.onerror=null;
     ws_=null;el.textContent='disconnected';el.className='err';_wbHideBytes();
     // 关闭当下就把这条连接的写权限退回未知：先复位首帧标志（重连后要等新首帧才恢复
     // 结论），再 _wbSetWsWrite(null) —— 它同时收起输入（term.onData/toolbar/_fwdScroll
@@ -27657,8 +27679,9 @@ if(typeof ResizeObserver!=='undefined'){
       el.textContent=e.reason||'原终端连接不可用；请重新打开页面。';el.title=el.textContent;return;
     }
     setTimeout(connect,2000);
-  };
-  ws.onerror=function(){ws.close()};
+  }
+  ws.onclose=disconnected;
+  ws.onerror=function(){retry('连接失败，正在重连…')};
 })();
 
 // ── Wheel / touch scroll handling ──
