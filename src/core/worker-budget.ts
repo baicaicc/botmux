@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { totalmem } from 'node:os';
 import { posix } from 'node:path';
@@ -70,6 +71,8 @@ interface MemoryPressureReadOptions {
   readFile?: (path: string) => string;
   procRoot?: string;
   cgroupRoot?: string;
+  /** Test seam: resolve `sysctl -n <keys...>` output without spawning the process. */
+  execFileSysctl?: (keys: string[]) => string;
 }
 
 interface CgroupMount {
@@ -95,6 +98,63 @@ function parseMemoryFullAvg10(raw: string): number | undefined {
   if (!match) return undefined;
   const value = Number(match[1]);
   return Number.isFinite(value) ? value : undefined;
+}
+
+/**
+ * macOS has no /proc or PSI; the closest equivalent of MemAvailable is the
+ * XNU page pools a running system can hand out without swapping: free +
+ * inactive, plus speculative file-cache pages. `sysctl vm.page_*` reports
+ * page counts, so scale by vm.pagesize. memoryFullAvg10 is deliberately left
+ * unavailable on darwin: with no PSI the byte reserve alone gates admission,
+ * and a fabricated 0 would hide genuine contention from evaluatePsiReason.
+ */
+const DARWIN_MEMORY_SYSCTL_KEYS = [
+  'vm.pagesize',
+  'vm.page_free_count',
+  'vm.page_inactive_count',
+  'vm.page_speculative_count',
+];
+
+function parseDarwinMemoryStats(raw: string): number | undefined {
+  const values = raw.trim().split('\n').map(line => Number(line.trim()));
+  if (values.length !== DARWIN_MEMORY_SYSCTL_KEYS.length) return undefined;
+  if (!values.every(value => Number.isInteger(value) && value >= 0)) return undefined;
+  const [pageSize, free, inactive, speculative] = values;
+  if (!pageSize) return undefined;
+  return (free + inactive + speculative) * pageSize;
+}
+
+function readDarwinHostMemoryPressure(
+  totalMemoryBytes: number,
+  options: MemoryPressureReadOptions,
+): HostMemoryPressure {
+  const unavailable = (warnings: string[]): HostMemoryPressure => ({
+    totalMemoryBytes,
+    totalMemorySource: 'host',
+    availableMemorySource: 'unavailable',
+    memoryFullAvg10Source: 'unavailable',
+    warnings,
+  });
+  let raw: string;
+  try {
+    raw = options.execFileSysctl
+      ? options.execFileSysctl([...DARWIN_MEMORY_SYSCTL_KEYS])
+      : execFileSync('sysctl', ['-n', ...DARWIN_MEMORY_SYSCTL_KEYS], { encoding: 'utf8' });
+  } catch (error) {
+    return unavailable([`sysctl memory probe failed: ${error instanceof Error ? error.message : String(error)}`]);
+  }
+  const availableMemoryBytes = parseDarwinMemoryStats(raw);
+  if (availableMemoryBytes === undefined) {
+    return unavailable([`sysctl ${DARWIN_MEMORY_SYSCTL_KEYS.join(' ')} output was incomplete`]);
+  }
+  return {
+    totalMemoryBytes,
+    availableMemoryBytes,
+    totalMemorySource: 'host',
+    availableMemorySource: 'host',
+    memoryFullAvg10Source: 'unavailable',
+    warnings: [],
+  };
 }
 
 function parseCgroupValue(raw: string): number | 'max' | undefined {
@@ -414,7 +474,11 @@ function finiteCgroupPressure(result: Extract<CgroupMemoryResult, { kind: 'finit
 export function readHostMemoryPressure(options: MemoryPressureReadOptions = {}): HostMemoryPressure {
   const totalMemoryBytes = options.totalMemoryBytes ?? totalmem();
   const readFile = options.readFile ?? (path => readFileSync(path, 'utf8'));
-  if ((options.platform ?? process.platform) !== 'linux') {
+  const platform = options.platform ?? process.platform;
+  if (platform === 'darwin') {
+    return readDarwinHostMemoryPressure(totalMemoryBytes, options);
+  }
+  if (platform !== 'linux') {
     return {
       totalMemoryBytes,
       totalMemorySource: 'host',
