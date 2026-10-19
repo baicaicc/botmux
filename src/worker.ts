@@ -286,7 +286,7 @@ import {
   isStructuredBridgeFallbackActive,
   isStructuredBridgeLifecycleBlockingCli,
 } from './services/structured-bridge-clis.js';
-import { drainCursorTranscript, findCursorChatIdByPid, findCursorTranscriptByChatId, findCursorTranscriptByPid } from './services/cursor-transcript.js';
+import { baselineCursorTranscript, drainCursorTranscript, findCursorChatIdByPid, findCursorTranscriptByChatId, findCursorTranscriptByPid } from './services/cursor-transcript.js';
 import { startCursorCot, stopAllCursorCot, type CursorCotEntry } from './services/cursor-cot.js';
 import { startAntigravityCot, stopAntigravityCot, stopAllAntigravityCot, type AntigravityCotEntry } from './services/antigravity-cot.js';
 import { findAntigravityConversationIdByPid } from './services/antigravity-discovery.js';
@@ -476,7 +476,6 @@ import {
 } from './utils/stuck-detector.js';
 import { processStuckWarningTuiKeys, shouldRearmStuckDetector } from './utils/stuck-key-guard.js';
 import { sendTuiKeySequence, submitTuiTextInput } from './utils/tui-input-delivery.js';
-import { captureToPng } from './utils/screenshot-renderer.js';
 import { snapshotToPng, snapshotToText, shouldCaptureScreen, isScreenSelfDriven } from './utils/transient-snapshot.js';
 import { chooseWebTerminalSeed } from './utils/web-terminal-seed.js';
 import {
@@ -6014,6 +6013,8 @@ function deliverRemoteTurnFinal(text: string, exactTurnId?: string): void {
   const adoptMode = lastInitConfig?.adoptMode === true;
   const markers = adoptMode ? [] : readSendMarkers();
   const gateInput = {
+    turnId,
+    dispatchAttempt,
     markTimeMs: mark?.markTimeMs,
     isLocal: false,
     finalText: text,
@@ -8155,9 +8156,18 @@ function codexBridgeAttach(rolloutPath: string, mode: 'baseline-existing' | 'bas
     structuredBridgeRecoveryAttempted = true;
     log(`Codex bridge split-live degraded to fresh (file missing): ${rolloutPath}`);
   } else if (mode === 'baseline-existing-skip-tail' && existsSync(rolloutPath)) {
-    let size = 0;
-    try { size = statSync(rolloutPath).size; } catch { /* degrade below */ }
-    codexBridgeOffset = size;
+    // Cursor (the only skip-tail caller) parks the baseline at a trailing
+    // `turn_ended` footer: the next turn truncates the footer and rewrites
+    // from its start, which a plain EOF baseline would sit past. One snapshot
+    // decides the offset — no separate stat a concurrent rewrite could skew.
+    let offset = structuredBridgeIs('cursor')
+      ? baselineCursorTranscript(rolloutPath, { skipTail: true })?.newOffset
+      : undefined;
+    if (offset === undefined) {
+      offset = 0;
+      try { offset = statSync(rolloutPath).size; } catch { /* degrade below */ }
+    }
+    codexBridgeOffset = offset;
     codexBridgePendingTail = '';
     codexBridgeBaselineDone = true;
     structuredBridgeRecoveryAttempted = true;
@@ -8230,7 +8240,10 @@ function codexBridgeAttach(rolloutPath: string, mode: 'baseline-existing' | 'bas
         }
       }
     } else {
-      const cursor = baselineJsonlCursor(rolloutPath);
+      // Cursor (zero-prompt resume) needs the footer-aware baseline for the
+      // same reason as the skip-tail branch above.
+      const cursor = (structuredBridgeIs('cursor') ? baselineCursorTranscript(rolloutPath) : undefined)
+        ?? baselineJsonlCursor(rolloutPath);
       codexBridgeOffset = cursor.newOffset;
       codexBridgePendingTail = cursor.pendingTail;
       codexBridgeBaselineDone = true;
@@ -10829,6 +10842,36 @@ function scheduleOneShotAfterAction(): void {
   }, POST_ACTION_DELAY_MS);
 }
 
+/**
+ * Lazily-backed, injectable indirection to @napi-rs/canvas's PNG renderer.
+ *
+ * WHY a module-scope wrapper instead of a `const { captureToPng } = await
+ * import(...)` inside captureAndUpload(): @napi-rs/canvas is a native addon a
+ * compiled binary may lack, so the import MUST stay lazy (a static import would
+ * fail the worker at module init, not just a screenshot). But declaring the
+ * binding inside captureAndUpload broke the capture path's dependency-injection
+ * seam: test/worker-screenshot-upload-hardening.test.ts slices this function's
+ * body into `new Function('deps', …)` and injects `captureToPng` as a FREE
+ * variable — a block-scoped `const` shadows it, and the extra `await import`
+ * also pushed the render past the harness's two-tick flush.
+ *
+ * Keeping the import inside a module-scope function named `captureToPng` puts
+ * the lazy load back behind the SAME free identifier the harness injects, so
+ * the seam is intact while worker init still never touches the native addon.
+ * The dynamic `import()` is cached by the module system, so repeat calls are
+ * cheap. NOTE: no explicit "stale after import" checkpoint is needed here —
+ * the import performs no rendering, and captureAndUpload's existing
+ * `if (frameIsStale()) cancelStale('render')` right after the awaited render is
+ * what actually prevents a stale frame from uploading.
+ */
+async function captureToPng(
+  terminal: Parameters<typeof import('./utils/screenshot-renderer.js')['captureToPng']>[0],
+  opts: Parameters<typeof import('./utils/screenshot-renderer.js')['captureToPng']>[1],
+): Promise<Buffer> {
+  const { captureToPng: renderPng } = await import('./utils/screenshot-renderer.js');
+  return renderPng(terminal, opts);
+}
+
 async function captureAndUpload(): Promise<void> {
   // displayMode mismatch should be impossible during a running loop (start/stop
   // gate on it). Logging here exists to surface the unexpected case — e.g. a
@@ -10904,6 +10947,8 @@ async function captureAndUpload(): Promise<void> {
         usageLimitContent = snap;
         const shotCols = clamp(term.cols, MIN_RENDER_COLS, MAX_RENDER_COLS);
         const shotRows = clamp(term.rows, MIN_RENDER_ROWS, MAX_RENDER_ROWS);
+        // `captureToPng` is the module-scope lazy wrapper above: the canvas native
+        // is still only loaded on first use, never at worker init.
         png = await captureToPng(term, { cols: shotCols, rows: shotRows, startY });
         if (frameIsStale()) { cancelStale('render'); return; }
       }
