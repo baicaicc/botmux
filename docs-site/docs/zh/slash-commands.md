@@ -207,7 +207,7 @@ Dashboard 的「Bot 默认设置 → 安全 → Slash 命令」还有一个可�
 | 命令 | 说明 |
 |------|------|
 | `/login` | 飞书基础用户授权：消息读取、资源访问和授权续期；不默认申请云文档、通讯录或日历权限 |
-| `/login --scope <权限名> [更多权限名]` | 在基础权限上按需追加指定权限，例如 `/login --scope docx:document:readonly` |
+| `/login --scope <权限名>... [--force]` | 在基础权限上按需追加指定权限，例如 `/login --scope docx:document:readonly`；加 `--force` 跳过本地目录校验（仅做语法校验）以支持未收录新权限 |
 | `/login status` | 查看授权状态 |
 | `/login tags` | 会话群标签专项授权（消息分组权限），授权后新建会话群自动进入侧边栏分组（p2pMode=group + feed-group 标签模式用，feed-group 为默认标签模式） |
 | `/pair <配对码>` | 把 Web/Dashboard 端的会话与你的飞书身份配对（在网页端拿配对码，话题里发 `/pair <码>` 认领） |
@@ -267,6 +267,8 @@ Dashboard 的「Bot 默认设置 → 安全 → Slash 命令」还有一个可�
 ## 🆕 一键新建会话群
 
 `/group <群名>`（别名 `/g`）：自动新建飞书群、邀请你进群、转让群主，整个群作为一个独立 CLI 会话。`@botA @botB /g <群名>` 可把多个机器人一并拉进新群。
+
+新群默认像群聊模式的会话群一样用渐变 logo 头像；不写群名时会在第一条消息后按内容自动改群名。
 
 加上 `--role-profile <profile>` 可以在新群里自动 bootstrap 一套按 bot 区分的角色：
 

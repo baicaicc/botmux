@@ -207,7 +207,7 @@ The panel needs the optional scopes `application:app_slash_command:read` / `appl
 | Command | Description |
 |------|------|
 | `/login` | Basic Lark user authorization: read messages, access resources, and renew authorization; does not request docs, contacts, or calendar permissions by default |
-| `/login --scope <scope> [more scopes]` | Add only the requested permissions to the basic scopes, e.g. `/login --scope docx:document:readonly` |
+| `/login --scope <scope>... [--force]` | Add requested permissions to basic scopes, e.g. `/login --scope docx:document:readonly`; add `--force` to bypass local catalog validation for uncataloged new scopes |
 | `/login status` | View authorization status |
 | `/login tags` | Session-group tag authorization (feed-group scopes); once granted, new session groups auto-join your sidebar feed group (for p2pMode=group with the feed-group tag mode — the default) |
 | `/pair <pairing code>` | Pair a Web/Dashboard-side session with your Lark identity (get the pairing code on the web side, then send `/pair <code>` in the topic to claim it) |
@@ -267,6 +267,8 @@ Written and hot-applied — no restart needed.
 ## 🆕 One-Click New Session Group
 
 `/group <group name>` (alias `/g`): automatically creates a new Lark group, invites you in, transfers ownership to you, and runs the entire group as a standalone CLI session. `@botA @botB /g <group name>` can add multiple bots into the new group at once.
+
+Like session groups, the new group gets a gradient logo avatar by default, and without a name it is renamed from its first message.
 
 Add `--role-profile <profile>` to bootstrap the new group with reusable per-bot roles:
 

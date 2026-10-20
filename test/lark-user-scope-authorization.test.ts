@@ -48,14 +48,50 @@ function post(overrides: Record<string, unknown> = {}) {
 }
 
 describe('Base user scopes are in the catalog', () => {
-  it('accepts the exact names Feishu returns for a user-token Base create', () => {
+  it('accepts the exact names Feishu returns for a user-token Base create and v3 operations', () => {
     expect(isKnownLarkUserScope('base:app:create')).toBe(true);
     expect(isKnownLarkUserScope('bitable:app')).toBe(true);
+    expect(isKnownLarkUserScope('base:app:read')).toBe(true);
+    expect(isKnownLarkUserScope('base:table:read')).toBe(true);
+    expect(isKnownLarkUserScope('base:field:read')).toBe(true);
+    expect(isKnownLarkUserScope('base:record:read')).toBe(true);
+    expect(isKnownLarkUserScope('base:view:read')).toBe(true);
+    expect(isKnownLarkUserScope('base:record:create')).toBe(true);
+    expect(isKnownLarkUserScope('base:record:update')).toBe(true);
+    expect(isKnownLarkUserScope('base:record:delete')).toBe(true);
+    expect(isKnownLarkUserScope('base:block:read')).toBe(true);
+    expect(isKnownLarkUserScope('base:block:create')).toBe(true);
+    expect(isKnownLarkUserScope('base:block:delete')).toBe(true);
+    expect(isKnownLarkUserScope('base:block:update')).toBe(true);
+    expect(isKnownLarkUserScope('base:appmode:read')).toBe(true);
+    expect(isKnownLarkUserScope('base:appmode:create')).toBe(true);
+    expect(isKnownLarkUserScope('base:appmode_page:read')).toBe(true);
+    expect(isKnownLarkUserScope('base:appmode_page:delete')).toBe(true);
+    expect(isKnownLarkUserScope('base:appmode_block:read')).toBe(true);
+    expect(isKnownLarkUserScope('base:workspace:read')).toBe(true);
+    expect(isKnownLarkUserScope('base:workspace:create')).toBe(true);
+    expect(isKnownLarkUserScope('base:workspace:update')).toBe(true);
   });
 
   it('still rejects a misspelled Base scope', () => {
     expect(isKnownLarkUserScope('base:app:crate')).toBe(false);
+    expect(isKnownLarkUserScope('base:table:raed')).toBe(false);
     expect(isKnownLarkUserScope('bitable:apps')).toBe(false);
+  });
+
+  it('allows uncataloged scopes when allowUnknown or BOTMUX_ALLOW_UNKNOWN_SCOPES is enabled', () => {
+    expect(isKnownLarkUserScope('future:service:read')).toBe(false);
+    expect(isKnownLarkUserScope('future:service:read', { allowUnknown: true })).toBe(true);
+    expect(isKnownLarkUserScope('bad scope syntax', { allowUnknown: true })).toBe(false);
+
+    const prev = process.env.BOTMUX_ALLOW_UNKNOWN_SCOPES;
+    try {
+      process.env.BOTMUX_ALLOW_UNKNOWN_SCOPES = '1';
+      expect(isKnownLarkUserScope('future:service:read')).toBe(true);
+    } finally {
+      if (prev === undefined) delete process.env.BOTMUX_ALLOW_UNKNOWN_SCOPES;
+      else process.env.BOTMUX_ALLOW_UNKNOWN_SCOPES = prev;
+    }
   });
 });
 
@@ -70,17 +106,16 @@ describe('Contact user search scope is in the catalog', () => {
 });
 
 describe('auth-request handler — user scope authorization', () => {
-  it('mints an authorize URL for a legal Base scope, bound to the verified caller', async () => {
-    const res = await post({ scopes: ['base:app:create', 'bitable:app'] });
+  it('mints an authorize URL for legal Base v3 scopes, bound to the verified caller', async () => {
+    const scopes = ['base:app:read', 'base:table:read', 'base:field:read', 'base:record:read'];
+    const res = await post({ scopes });
     expect(res.status).toBe(200);
     const body = await res.json() as any;
     expect(body.ok).toBe(true);
     expect(body.authUrl).toContain('authorize');
-    // the authorization is minted for exactly the requested scopes and the
-    // verified caller — the binding the gate protects.
     expect(tokens.requestUserAuthorization).toHaveBeenCalledTimes(1);
     const call = vi.mocked(tokens.requestUserAuthorization).mock.calls[0];
-    expect(call[3]).toEqual(['base:app:create', 'bitable:app']);
+    expect(call[3]).toEqual(scopes);
     expect(call[4]).toBe('ou_sender');
   });
 
@@ -88,6 +123,36 @@ describe('auth-request handler — user scope authorization', () => {
     const res = await post({ scopes: ['base:app:crate'] });
     expect(res.status).toBe(400);
     expect(await res.json()).toEqual({ ok: false, error: 'unknown_scopes', scopes: ['base:app:crate'] });
+    expect(tokens.requestUserAuthorization).not.toHaveBeenCalled();
+  });
+
+  it('mints an authorize URL for uncataloged scope when allowUnknown=true', async () => {
+    const res = await post({ scopes: ['future:new:capability'], allowUnknown: true });
+    expect(res.status).toBe(200);
+    expect(tokens.requestUserAuthorization).toHaveBeenCalledTimes(1);
+    const call = vi.mocked(tokens.requestUserAuthorization).mock.calls[0];
+    expect(call[3]).toEqual(['future:new:capability']);
+  });
+
+  it('mints an authorize URL for uncataloged scope when BOTMUX_ALLOW_UNKNOWN_SCOPES=1 in environment', async () => {
+    const prev = process.env.BOTMUX_ALLOW_UNKNOWN_SCOPES;
+    try {
+      process.env.BOTMUX_ALLOW_UNKNOWN_SCOPES = '1';
+      const res = await post({ scopes: ['future:env:capability'] });
+      expect(res.status).toBe(200);
+      expect(tokens.requestUserAuthorization).toHaveBeenCalledTimes(1);
+      const call = vi.mocked(tokens.requestUserAuthorization).mock.calls[0];
+      expect(call[3]).toEqual(['future:env:capability']);
+    } finally {
+      if (prev === undefined) delete process.env.BOTMUX_ALLOW_UNKNOWN_SCOPES;
+      else process.env.BOTMUX_ALLOW_UNKNOWN_SCOPES = prev;
+    }
+  });
+
+  it('rejects malformed scope even when allowUnknown=true', async () => {
+    const res = await post({ scopes: ['bad scope syntax'], allowUnknown: true });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ ok: false, error: 'unknown_scopes', scopes: ['bad scope syntax'] });
     expect(tokens.requestUserAuthorization).not.toHaveBeenCalled();
   });
 
