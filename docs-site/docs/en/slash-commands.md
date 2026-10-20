@@ -84,6 +84,8 @@ A few boundaries:
 - The header's `/repo wt` does not accept the numeric form (numbers only mean something on the picker card); the in-session `/repo wt <N|project name> [branch]` still does.
 - A standalone mid-session `/repo` still takes the rest of the line, unlike the single-token rule inside the header.
 
+Codex capacity recovery is **off by default**. Administrators can enable it with `/botconfig set codexCapacityRecovery on` and disable it with `/botconfig set codexCapacityRecovery off`. When enabled, managed Codex Lark sessions automatically continue explicit model-capacity failures (`server_overloaded`) after 15 seconds and, if needed, another 45 seconds. Each continuation appends a recovery input to the native session (at most two per task); these inputs may remain in model context, and disabling recovery does not delete history. An opted-out pending recovery is saved as cancelled with one notice, so re-enabling recovery or restarting does not revive that old task. Detection is not specific to modelhub and does not guarantee a quick recovery. Continuations resume existing progress instead of replaying the original task. New input, `/stop`, or closing the session cancels the previous recovery. After a process restart, pending or unconfirmed recovery stops and requires manual continuation. Already running work can still deliver a successful result, but a late capacity failure will not trigger another automatic continuation, avoiding replay of a cancellation that could not be saved. After two unsuccessful continuations, the failure card offers a manual retry. Generic 503, stream, authentication and rate-limit errors retain their existing behavior, as do adopted, HTTP and meeting-receiver sessions.
+
 ## 💬 Reply Mode (`/reply-mode`)
 
 Controls how the bot opens a session when @mentioned. No argument (or `status`) shows the current mode; changing it needs `canOperate`, viewing needs `canTalk`. In group chats you must @ the target bot (in multi-bot groups, @ the specific bot). Only regular groups and 1:1 DMs are supported; topic groups need no setting (they're already topics) and the command is rejected there.
@@ -188,6 +190,10 @@ Rules: only a leading run of passthrough lines forms a cascade (a botmux command
 
 Permissions are the same as `/help`, and it doesn't occupy a session slot.
 
+Dashboard's **Bot Defaults → Security → Slash Commands** section also has an optional **native Lark command panel**. It lists botmux's own commands (including aliases, derived directly from the command registry) as candidates and marks each entry as synced, missing, or outdated on Lark; users decide what to register with each row's **Sync** action. Commands that only exist remotely are shown too and can be deleted one at a time. **Sync all to Lark** is an explicit additive operation: it creates missing entries and updates descriptions, but never deletes implicitly. CLI passthrough commands (`/compact`, `/model`, …) are not candidates yet, because support differs across CLIs and input backends.
+
+The panel needs the optional scopes `application:app_slash_command:read` / `application:app_slash_command:write`. They are **not** part of the default scope manifest and the startup self-check never tops them up automatically; when they are missing, or the tenant is not in Lark's gated rollout (desktop 7.70+ and the FG allowlist), the panel only shows "unavailable" plus grant links, and every other bot feature keeps working. The native `/` panel may take about five minutes to refresh in Lark clients. Working-directory `.claude` discoveries, skills, plugins, and MCP prompts are not stable app-wide capabilities, so they remain visible only in botmux's `/slash` card and are not registered remotely.
+
 ## 📡 Session Onboarding
 
 | Command | Description |
@@ -201,7 +207,7 @@ Permissions are the same as `/help`, and it doesn't occupy a session slot.
 | Command | Description |
 |------|------|
 | `/login` | Basic Lark user authorization: read messages, access resources, and renew authorization; does not request docs, contacts, or calendar permissions by default |
-| `/login --scope <scope> [more scopes]` | Add only the requested permissions to the basic scopes, e.g. `/login --scope docx:document:readonly` |
+| `/login --scope <scope>... [--force]` | Add requested permissions to basic scopes, e.g. `/login --scope docx:document:readonly`; add `--force` to bypass local catalog validation for uncataloged new scopes |
 | `/login status` | View authorization status |
 | `/login tags` | Session-group tag authorization (feed-group scopes); once granted, new session groups auto-join your sidebar feed group (for p2pMode=group with the feed-group tag mode — the default) |
 | `/pair <pairing code>` | Pair a Web/Dashboard-side session with your Lark identity (get the pairing code on the web side, then send `/pair <code>` in the topic to claim it) |
@@ -261,6 +267,8 @@ Written and hot-applied — no restart needed.
 ## 🆕 One-Click New Session Group
 
 `/group <group name>` (alias `/g`): automatically creates a new Lark group, invites you in, transfers ownership to you, and runs the entire group as a standalone CLI session. `@botA @botB /g <group name>` can add multiple bots into the new group at once.
+
+Like session groups, the new group gets a gradient logo avatar by default, and without a name it is renamed from its first message.
 
 Add `--role-profile <profile>` to bootstrap the new group with reusable per-bot roles:
 
