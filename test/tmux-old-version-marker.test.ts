@@ -6,8 +6,11 @@
  *
  * This test builds a tiny PATH shim that reports `tmux 3.1c` and rejects
  * `new-session -e`, while delegating every other command to the real binary.
- * Everything runs against a private TMUX_TMPDIR socket, so neither the user's
- * default server nor the fleet is touched.
+ *
+ * Isolation is mandatory (see test/tmux-test-isolation-guard.test.ts and the
+ * 2026-10-20 incident): an inherited TMUX makes a client ignore TMUX_TMPDIR and
+ * talk to the caller's server, so every env is built with privateTmuxEnv()
+ * (strips TMUX/TMUX_PANE) and cleanup targets the explicit private -S socket.
  */
 import { execFileSync, spawnSync } from 'node:child_process';
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -16,7 +19,10 @@ import { join } from 'node:path';
 import { afterAll, expect, it, vi } from 'vitest';
 import { TmuxPipeBackend } from '../src/adapters/backend/tmux-pipe-backend.js';
 import { resetTmuxVersionCacheForTests } from '../src/setup/ensure-tmux.js';
+import { privateTmuxEnv } from './helpers/private-tmux-env.js';
 
+// Resolved at module load, before PATH is stubbed, so it points at the REAL
+// binary the shim delegates to (never the shim itself, which would recurse).
 function realTmuxPath(): string | null {
   for (const dir of (process.env.PATH ?? '').split(':')) {
     if (!dir) continue;
@@ -38,7 +44,7 @@ it.skipIf(process.platform !== 'linux' || spawnSync('tmux', ['-V'], { timeout: 3
     const socketRoot = join(workRoot, 'sock');
     mkdirSync(shimDir, { recursive: true });
     // tmux silently falls back to /tmp when TMUX_TMPDIR does not exist —
-    // without this the test drives (and kill-server's) the HOST default server.
+    // without this the test would drive (and kill-server) the HOST server.
     mkdirSync(socketRoot, { recursive: true });
     const shim = join(shimDir, 'tmux');
     writeFileSync(shim, `#!/bin/sh
@@ -57,10 +63,13 @@ exec ${realTmux} "$@"
     chmodSync(shim, 0o755);
 
     const pathWithShim = `${shimDir}:${process.env.PATH}`;
+    // The backend's version/has-session probes read process.env, so stub both
+    // there too; privateTmuxEnv() is what strips an inherited TMUX for safety.
     vi.stubEnv('PATH', pathWithShim);
     vi.stubEnv('TMUX_TMPDIR', socketRoot);
     resetTmuxVersionCacheForTests();
-    const env = { ...process.env, PATH: pathWithShim, TMUX_TMPDIR: socketRoot } as Record<string, string>;
+    const env = privateTmuxEnv(socketRoot, { PATH: pathWithShim }) as Record<string, string>;
+    const privateSocket = join(socketRoot, `tmux-${process.getuid!()}`, 'default');
     const tmux = (args: string[]) => execFileSync('tmux', args, {
       env, encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'pipe'],
     }).trim();
@@ -97,7 +106,8 @@ exec ${realTmux} "$@"
       }
     } finally {
       fresh.kill();
-      spawnSync('tmux', ['kill-server'], { env, timeout: 3000, stdio: 'ignore' });
+      // Explicit -S socket is immune to an inherited TMUX; never bare kill-server.
+      spawnSync('tmux', ['-S', privateSocket, 'kill-server'], { env, timeout: 3000, stdio: 'ignore' });
       vi.unstubAllEnvs();
       resetTmuxVersionCacheForTests();
       rmSync(workRoot, { recursive: true, force: true });
