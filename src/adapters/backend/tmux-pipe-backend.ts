@@ -1147,6 +1147,13 @@ export class TmuxPipeBackend implements SessionBackend {
 
   private createDetachedSession(bin: string, args: string[], opts: SpawnOpts): void {
     const instanceIdentity = opts.env?.BOTMUX_CODEX_INSTANCE_BINDING;
+    // `new-session -e` only exists since tmux 3.2 (3.0/3.1 reject it with
+    // "unknown flag", a deterministic non-retryable launch failure). On older
+    // or unparsable versions the binding is written with set-environment after
+    // a proven-fresh creation instead. Unknown version deliberately takes the
+    // conservative path (never send a flag the server may not understand).
+    const tmuxVersion = getTmuxVersionCached();
+    const newSessionAcceptsE = tmuxVersionAtLeast(tmuxVersion, 3, 2);
     const shellSpec = opts.strictEnv ? { shell: '/bin/sh', flags: [] } : resolveUserShell(process.env, opts.launchShell);
     const envAssignments = buildBotmuxEnvAssignments(opts.env, opts.injectEnv);
     const script = shellWrapperScript(
@@ -1162,7 +1169,10 @@ export class TmuxPipeBackend implements SessionBackend {
       '-s', this.paneTarget,
       '-x', String(opts.cols),
       '-y', String(opts.rows),
-      ...(instanceIdentity ? ['-e', `BOTMUX_CODEX_INSTANCE_BINDING=${instanceIdentity}`] : []),
+      // On >= 3.2 mark atomically at creation, so a session whose creating
+      // reply was lost to a timeout still carries the binding and can be
+      // adopted via the duplicate path below.
+      ...(instanceIdentity && newSessionAcceptsE ? ['-e', `BOTMUX_CODEX_INSTANCE_BINDING=${instanceIdentity}`] : []),
       '--',
       ...(opts.strictEnv ? strictPaneCommand(bin, args, opts) : shellCommandArgv(shellSpec, script, [
         opts.cwd,
@@ -1210,8 +1220,24 @@ export class TmuxPipeBackend implements SessionBackend {
     this.createdSession = createdIdentity
       ? { id: createdIdentity.split(' ')[1]!, identity: createdIdentity }
       : null;
-    // A duplicate on retry may be a timed-out create, or a concurrent creator.
-    // Verify the actual binding before changing options or subscribing output.
+    // Pre-3.2 (or unknown) tmux: persist the binding in the session
+    // environment AFTER a proven-fresh creation, since new-session could not
+    // set it atomically. set-environment exists on every supported tmux and
+    // writes only this session's table (never -g). A duplicate (a timed-out
+    // earlier create or a concurrent creator) is never written to — it must
+    // pass assertInstanceIdentity first, otherwise we could stamp our binding
+    // onto another instance's session. If this write fails the assert below
+    // fails too, spawn throws, and the worker retires the session we created.
+    if (this.createdSession && instanceIdentity && !newSessionAcceptsE) {
+      execFileSync('tmux',
+        ['set-environment', '-t', this.paneTarget, 'BOTMUX_CODEX_INSTANCE_BINDING', instanceIdentity],
+        { stdio: ['ignore', 'ignore', 'pipe'], timeout: 5000, env: tmuxEnv() });
+    }
+    // Fence both shapes before changing options or subscribing output: a
+    // duplicate must carry the expected binding; on the fresh path this also
+    // re-reads the marker just written/created (redundant but fail-closed —
+    // only a millisecond-scale server stall right after creation can make it
+    // throw, and the next worker cycle reattaches with the pane preserved).
     if (instanceIdentity) TmuxBackend.assertInstanceIdentity(this.paneTarget, instanceIdentity);
     this.applySessionOptions();
   }
