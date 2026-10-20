@@ -16,8 +16,9 @@ import { antigravityTranscriptPath } from './antigravity-transcript.js';
 import { findTraexRolloutBySessionId, findTraexSessionIdByBotmuxSessionId } from './traex-transcript.js';
 import { findPiTranscriptBySessionId } from './pi-transcript.js';
 import { findGrokUpdatesBySessionId } from './grok-transcript.js';
+import { minimaxDataDirForBot } from './minimax-paths.js';
 
-export type TranscriptKind = 'claude' | 'codex' | 'coco' | 'cursor' | 'traex' | 'pi' | 'grok' | 'antigravity';
+export type TranscriptKind = 'claude' | 'codex' | 'coco' | 'cursor' | 'traex' | 'pi' | 'grok' | 'antigravity' | 'minimax';
 
 export interface TranscriptPathQuery {
   cliId?: CliId | 'unknown';
@@ -134,6 +135,23 @@ export function getClaudeSessionJsonlPath(
     if (globbed && regularFileMtime(globbed) !== null) return globbed;
   }
   return null;
+}
+
+/** Claude Code data root for one session: its frozen config profile, else ~/.claude.
+ *  Only trusted when the stored session belongs to the queried bot. */
+function claudeSessionDataRoot(q: TranscriptPathQuery): string {
+  // Best-effort: this path never depended on the session store before profiles
+  // existed, so an unavailable store must degrade to ~/.claude, not throw.
+  let session: ReturnType<typeof getSession>;
+  try { session = getSession(q.sessionId); } catch { session = undefined; }
+  // Adopted sessions wrap an external CLI on the default data root; an older
+  // build may have frozen the bot profile onto such a row, so ignore it there.
+  const profile = session?.cliConfigDir
+    && !session.adoptedFrom
+    && (!q.larkAppId || q.larkAppId === session.larkAppId)
+    ? session.cliConfigDir
+    : undefined;
+  return profile ? resolve(expandHome(profile)) : join(homedir(), '.claude');
 }
 
 /** Resolve a Claude-family fork's (seed / relay) data root EXACTLY as the worker
@@ -295,7 +313,7 @@ function codexRolloutInHome(
  *  surface usage, so UI should hide usage-display options for it rather than
  *  offer a control that is always empty. */
 const USAGE_RESOLVABLE_CLI_IDS: ReadonlySet<string> = new Set([
-  'claude-code', 'aiden', 'seed', 'relay', 'codex', 'coco', 'cursor', 'traex', 'grok', 'antigravity',
+  'claude-code', 'aiden', 'seed', 'relay', 'codex', 'coco', 'cursor', 'traex', 'pi', 'grok', 'antigravity', 'minimax',
 ]);
 
 /** True when this CLI can produce native usage (has a resolvable transcript).
@@ -337,8 +355,15 @@ export function resolveSessionTranscriptPath(q: TranscriptPathQuery): ResolvedTr
   const svMappings = sessionScratchMappings(q);
   const v = (hostPath: string): string => scratchViewPath(svMappings, hostPath);
   switch (q.cliId) {
+    case 'minimax': {
+      const path = join(v(minimaxDataDirForBot(q.larkAppId)), 'v2', 'sqlite', 'runtime-state.sqlite');
+      return existsSync(path) ? { path, kind: 'minimax' } : null;
+    }
     case 'claude-code': {
-      const homeRoot = v(join(homedir(), '.claude'));
+      // A session launched on a config profile (`cliConfigDir`, frozen on the
+      // session) wrote its transcript under that profile, not ~/.claude.
+      const dataRoot = claudeSessionDataRoot(q);
+      const homeRoot = v(dataRoot);
       // cwd must be remapped too: on macOS Claude runs with the CLONE path as
       // cwd and keys its project dir by that slug; passing the host cwd here
       // yields a slug that never matches. (Linux identity-maps, so v() is a
@@ -347,7 +372,7 @@ export function resolveSessionTranscriptPath(q: TranscriptPathQuery): ResolvedTr
       const sq: TranscriptPathQuery = scratchCwd === q.cwd ? q : { ...q, cwd: scratchCwd };
       const path = svMappings
         ? (scratchCwd ? getClaudeSessionJsonlPath(sid, scratchCwd, homeRoot) : null)
-        : claudeJsonlWithBotHomeFallback(sid, sq, join(homedir(), '.claude'));
+        : claudeJsonlWithBotHomeFallback(sid, sq, dataRoot);
       return path ? { path, kind: 'claude' } : null;
     }
     case 'aiden': {

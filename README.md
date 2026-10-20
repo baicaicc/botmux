@@ -20,9 +20,7 @@
   <a href="README.en.md">English</a>
 </p>
 
-<p align="center">
-  <img src="docs/assets/botmux-product-panorama.png" width="1000" alt="botmux 产品全景：飞书话题连接实时卡片、Web 终端、多 Bot 编排与 20+ CLI / Agent">
-</p>
+https://github.com/user-attachments/assets/2cd97623-6b92-42ea-a9e9-75c6f5434db6
 
 ---
 
@@ -82,7 +80,7 @@ npm 包内带的是**同一个自包含二进制**（按 os/arch 只装匹配的
 
 ## 按 Bot 设置零注入
 
-在 Dashboard → 自定义中心 →「按 Bot 设置零注入」勾选一个或多个 bot，批量开启或恢复原配置；支持搜索与全选当前结果，每个 bot 独立保存，失败项会保留勾选供重试。也可在对应 `bots.json` 条目设置 `"promptInjection": "none"`。适合 lead-bot 派活、sub-bot 专注执行的场景。`default` / 删除字段恢复原行为，既有 prompt、角色和技能配置不会被清空。
+在 Dashboard →「Bot 配置」→ 选中 Bot →「高级」→「零注入」打开开关；需要统一管理多个 Bot 时，在「Agent 配置」里开启「零注入」分组，关联的 Bot 会随同步一起切换（此时 Bot 配置页的开关锁定）。也可在对应 `bots.json` 条目设置 `"promptInjection": "none"`。适合 lead-bot 派活、sub-bot 专注执行的场景。`default` / 删除字段恢复原行为，既有 prompt、角色和技能配置不会被清空。当前 CLI、终端后端或沙盒组合不支持时开关置灰并说明原因。
 
 此模式只传任务正文与附件信息，跳过 botmux 的系统提示、逐轮提醒、身份信封、角色、白板、记忆与技能目录；自动从 CLI 转写回传最终回答。使用新会话验证：已经进入历史的提示无法撤回，CLI 原生系统提示、项目 `AGENTS.md` 及用户自行安装的技能仍由 CLI 管理。
 
@@ -98,7 +96,7 @@ npm 包内带的是**同一个自包含二进制**（按 os/arch 只装匹配的
 
 `bots.json` 里用 `cliId` 一键切换。**20+ 适配器**，覆盖本地 CLI（进程隔离，`tmux attach` 可直连）和 API / 云 Agent（如 Mira、riff——通过 API / 远端接入，非本地进程；mojo 为 API 驱动、默认在宿主机执行工具，可配 cloud: true 走云沙箱）。代表项：
 
-`claude-code` · `codex` · `gemini` · `cursor` · `opencode` · `opencode2` · `mimocode` · `antigravity` · `copilot` · `grok` · `kimi` · `kiro-cli` · `reasonix` · `dsh` · `aiden` · `coco`(TRAE) · `hermes` · `ebsd` · `mira` · `riff`(云 Agent) … · `mojo`(API 驱动,默认宿主机执行) · `minimax`(MiniMax `mmx text repl`；区域由 `mmx auth login --region cn|global` 决定，同机多区用 per-bot `env` 的 `MMX_CONFIG_DIR` 隔离) …
+`claude-code` · `codex` · `gemini` · `cursor` · `opencode` · `opencode2` · `mimocode` · `antigravity` · `copilot` · `grok` · `kimi` · `kiro-cli` · `reasonix` · `dsh` · `aiden` · `coco`(TRAE) · `hermes` · `ebsd` · `mira` · `riff`(云 Agent) … · `mojo`(API 驱动,默认宿主机执行) · `remote-runner`([通用远端 Runner 协议](docs/remote-runner.md)) · `minimax`([MiniMax Code / mcode](docs/minimax-code.md)，支持文件与 Shell 工具、原生 Skills 和精确会话恢复；`mcode login` / `mcode login --region global` 登录，多账号用 `MINIMAX_DATA_DIR` 隔离) …
 
 `ebsd` 使用独立的外部服务身份和原生 OMP 会话目录；部署方必须通过受限权限文件配置 Diag Gateway token 与 ByteCloud service account，不能把密钥写入 `bots.json`。
 
@@ -162,7 +160,7 @@ npm 包内带的是**同一个自包含二进制**（按 os/arch 只装匹配的
 }
 ```
 
-也可在 Dashboard 的「Bot 配置 → 卡片 → 最终回答反馈」编辑，或用 `/botconfig set feedback '<json>'` 热更新。策略支持本地团队 → bot → bot-scoped chat 分层，优先级为 chat > bot > team；Dashboard 可预览最终生效策略。策略修改只影响之后交付的新卡；已发送卡片继续使用发送时快照。Agent 主动发送可声明 `botmux send --response-kind progress ...` 或 `botmux send --response-kind final ...`；未声明时默认按 progress/非 final 发送，只有显式 final 才挂反馈。数据仅落在本机 `botmux-feedback.sqlite`；可选 webhook 通过 durable outbox 投递 `turn.completed` 与 `feedback.revised` 事件。完整实现和边界见 [`docs/feedback-capability-current-implementation.md`](docs/feedback-capability-current-implementation.md)。
+也可在 Dashboard 的「Bot 配置 → 卡片 → 最终回答反馈」编辑，或用 `/botconfig set feedback '<json>'` 热更新。策略支持本地团队 → bot → bot-scoped chat 分层，优先级为 chat > bot > team；Dashboard 可预览最终生效策略。策略修改只影响之后交付的新卡；已发送卡片继续使用发送时快照。Agent 主动发送可声明 `botmux send --response-kind progress ...` 或 `botmux send --response-kind final ...`；未声明时默认按 progress/非 final 发送，只有显式 final 才挂反馈与页脚品牌签名。数据仅落在本机 `botmux-feedback.sqlite`；可选 webhook 通过 durable outbox 投递 `turn.completed` 与 `feedback.revised` 事件。完整实现和边界见 [`docs/feedback-capability-current-implementation.md`](docs/feedback-capability-current-implementation.md)。
 
 严格兼容 Codex 参数、交互与会话存储的独立发行版无需新增适配器：保留 `cliId: "codex"`，通过 `cliRuntime` 声明自己的 executable、展示名和更新源。BotMux 会按发行版隔离版本与会话身份，未知更新源不会回落到官方 Codex。详见 [Codex 兼容发行版](https://deepcoldy.github.io/botmux/adapters#codex-兼容发行版)。
 
@@ -199,3 +197,7 @@ botmux 不重新实现记忆、上下文管理、工具调用、权限体系—�
 - 📄 **License**：[MIT](LICENSE)
 
 <p align="center">好用的话，顺手点个 ⭐ Star 吧 → <a href="https://github.com/deepcoldy/botmux">deepcoldy/botmux</a></p>
+
+[建群参数与默认配置](docs/guide/group-creation.md)
+
+编译单文件二进制前须先执行 `bun run build`，生成用于内嵌的 `dist/.runtime-build-id`；编译版不在运行时读取此文件。

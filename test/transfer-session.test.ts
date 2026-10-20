@@ -1181,6 +1181,7 @@ describe('transferSession', () => {
       'cli_app_test',
       'om_old_card',
       expect.any(String),
+      { beforeWrite: expect.any(Function) },
     );
     const closedCard = JSON.parse(updateMessageMock.mock.calls[0][2]);
     expect(closedCard.header.title.content).toContain('会话已关闭');
@@ -2318,7 +2319,8 @@ describe('closeSession concurrency', () => {
       { fileToken: 'doc-token', fileType: 'docx' },
       'comment-1',
       'reply-1',
-      'reaction-1',
+      'Typing',
+      { identity: undefined },
     );
   });
 
@@ -2344,6 +2346,33 @@ describe('closeSession concurrency', () => {
     expect(sessionStore.updateSession).toHaveBeenCalledWith(stored);
     expect(sessionStore.closeSession).not.toHaveBeenCalled();
     expect(removeCommentReactionMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('cleans a pre-upgrade closed target that has replyId but no reaction metadata', async () => {
+    setActiveSessionsRegistry(new Map());
+    const stored = makeDs().session;
+    stored.status = 'closed';
+    stored.docCommentTargets = {
+      'turn-legacy': {
+        fileToken: 'doc-token',
+        fileType: 'docx',
+        commentId: 'comment-1',
+        turnId: 'turn-legacy',
+        replyId: 'reply-1',
+      },
+    };
+    vi.mocked(sessionStore.getOwnedSession).mockReturnValue(stored);
+
+    await closeSession(stored.sessionId);
+
+    expect(removeCommentReactionMock).toHaveBeenCalledWith(
+      'cli_app_test',
+      { fileToken: 'doc-token', fileType: 'docx' },
+      'comment-1',
+      'reply-1',
+      'Typing',
+      { identity: undefined },
+    );
   });
 
   it('does not treat another bot file found by read-only lookup as owned close state', async () => {

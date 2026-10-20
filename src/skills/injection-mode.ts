@@ -1,9 +1,9 @@
 /**
  * Built-in skill injection mode — how botmux's own bridge skills
  * (botmux-send / botmux-schedule / …) reach a CLI that only supports a GLOBAL
- * skills directory (codex/gemini/opencode/cursor/coco/traex/mtr/
+ * skills directory (codex/gemini/opencode/coco/traex/mtr/
  * kiro-cli/genius/grok — everything with an adapter `skillsDir`, i.e. no per-session
- * injection like Claude Code, Pi, or Oh My Pi).
+ * injection like Claude Code, Cursor, Pi, or Oh My Pi).
  *
  * Three modes, resolved from per-bot `skillInjection` (bots.json) → machine-wide
  * `skills.builtinInjection` (config.json) → the `prompt` default:
@@ -123,11 +123,11 @@ export function shouldInstallGlobalSkills(skillsDir: string): boolean {
  * How a CLI delivers botmux skills, for the dashboard control (and any other
  * consumer that must branch on skill-delivery capability):
  *  - 'dynamic': per-session injection — the claude-family (`--plugin-dir`,
- *    claude-code / seed / relay / oh-my-pi) and pi (`--skill`), which set `pluginDir`.
+ *    claude-code / seed / relay / oh-my-pi), cursor (`--plugin-dir`), and pi (`--skill`), which set `pluginDir`.
  *    Not configurable: they always inject dynamically, no global leak.
  *    The mode knobs don't apply.
  *  - 'global': a shared global skills dir (`skillsDir`) — codex/gemini/opencode/
- *    cursor/coco/traex/mtr/kiro-cli/genius/grok — where
+ *    coco/traex/mtr/kiro-cli/genius/grok — where
  *    global|prompt|off applies.
  *  - 'none': neither — the CLI has no skill mechanism (antigravity/aiden/hermes/
  *    mir/mira/codex-app), so there's nothing to configure.
@@ -153,7 +153,17 @@ const FULLY_ROUTING_COVERED_SKILLS = new Set(['botmux-history', 'botmux-quoted',
 /** Keep the prompt-mode discovery cost bounded. The native/global skill keeps
  *  its full frontmatter description; the one-line session catalog only needs a
  *  high-signal trigger for the send cases that routing does not fully cover. */
-function promptCatalogDescription(entry: BuiltinSkillEntry, locale?: Locale): string {
+function promptCatalogDescription(
+  entry: BuiltinSkillEntry,
+  locale?: Locale,
+  opts: { remoteRunner?: boolean } = {},
+): string {
+  if (entry.name === 'botmux-schedule' && opts.remoteRunner) {
+    const boundary = locale === 'en'
+      ? 'This session runs in a temporary Remote Runner environment. For any reminder or scheduled task that must run in the future, you MUST use the persistent `botmux schedule`; never use container cron, session-only `cron_create` / `CronCreate`, or `/loop`. If this turn is itself a fired schedule, execute it instead of creating another one.'
+      : '当前会话运行在可能被回收的 Remote Runner 临时环境中。凡需在未来触发的提醒或定时任务，必须使用持久化的 `botmux schedule`；不得使用容器内 cron、仅随 Session 存续的 `cron_create` / `CronCreate` 或 `/loop`。当前回合本身是已触发的定时任务时，应直接执行，不要再次创建。';
+    return `${boundary} ${entry.description}`;
+  }
   if (entry.name !== 'botmux-send') return entry.description;
   return locale === 'en'
     ? 'Read once before the first complex Lark send: multi-line/structured Markdown (tables or code blocks), attachments/cards/@mentions, cross-chat/top-level publishing, or --attention. Follow the full heredoc/--content-file guidance; never pass JSON.stringify/JSON-escaped \\n as literal text.'
@@ -239,7 +249,7 @@ export function builtinSkillContent(
 export function buildBuiltinSkillCatalogBlock(
   entries: BuiltinSkillEntry[],
   locale?: Locale,
-  opts: { hasRoutingBlock?: boolean } = {},
+  opts: { hasRoutingBlock?: boolean; remoteRunner?: boolean } = {},
 ): string {
   if (entries.length === 0) return '';
   const en = locale === 'en';
@@ -253,7 +263,7 @@ export function buildBuiltinSkillCatalogBlock(
     : (en
       ? 'These botmux skills are available in this session, and they are the ONLY documentation for them. Match the task against a description, then run `botmux skill show <name>` to read that skill\'s full instructions before acting — do not guess the commands.'
       : '当前 botmux 会话有下面这些内置技能，且这里是它们唯一的说明来源。先按描述判断该用哪个，再用 `botmux skill show <name>` 读取完整说明后再执行——不要凭空猜命令。');
-  const lines = entries.map((e) => escapeXmlText(`- ${e.name}: ${promptCatalogDescription(e, locale)}`));
+  const lines = entries.map((e) => escapeXmlText(`- ${e.name}: ${promptCatalogDescription(e, locale, opts)}`));
   // Distinct tag from the user-registered skill catalog (`<botmux_skills
   // mode=...>`, injected only in the worker via prepareSessionSkillPrompt) so
   // the two never collide and can co-exist in one prompt.

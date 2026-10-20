@@ -19,12 +19,15 @@
  * the outer block (CommonMark spec).
  */
 
+import { resolveReplyFooterPolicy } from '../../services/reply-footer.js';
+import type { ReplyCardPresentation } from '../../services/reply-card-render.js';
 import { homedir } from 'node:os';
 import { existsSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { resolve } from 'node:path';
 import MarkdownIt from 'markdown-it';
 import type Token from 'markdown-it/lib/token.mjs';
+import StateInline from 'markdown-it/lib/rules_inline/state_inline.mjs';
 import { t, type Locale } from '../../i18n/index.js';
 import type { ModelFallbackState } from '../../types.js';
 import {
@@ -33,8 +36,11 @@ import {
   replyCardHeadingElementId,
 } from './reply-card-footer-signature.js';
 import { buildFeedbackElement } from './skill-feedback-card.js';
+import { buildCompletionProposalElement } from './completion-proposal-card.js';
+import { composeFinalCardSections } from './final-card-sections.js';
 import type { FeedbackPolicy } from '../../services/feedback-policy.js';
 import type { StatuslineQuota } from '../../services/statusline-snapshot.js';
+import type { CompletionProposalRecord } from '../../core/completion-proposal.js';
 import type { ReplyCardHeader } from './reply-card-style.js';
 import { TABLE_AUTO_ROW_STYLE } from './table-style.js';
 import {
@@ -47,6 +53,10 @@ import {
 } from './vega-lite-chart.js';
 import { TURN_REPLY_CARD_MAX_BYTES, turnReplyCardRequestBytes } from './turn-reply-card-size.js';
 import { logger } from '../../utils/logger.js';
+import {
+  cardMarkdownImageReferences,
+  FEISHU_IMG_KEY,
+} from './card-markdown-image-references.js';
 
 /** Room kept for chrome that callers attach *after* a card is built and
  * fitted — today the on-call group button (≈483B of request body), added by
@@ -59,6 +69,13 @@ export type { CardRenderDiagnostic } from './vega-lite-chart.js';
 export { REPLY_CARD_FOOTER_MARKER } from './reply-card-footer-signature.js';
 
 const md = new MarkdownIt({ html: false, linkify: false, breaks: false });
+// This parser only classifies images for removal. Include schemes such as
+// file: that the HTML renderer rejects but Feishu may still treat as images.
+const imageScanMd = new MarkdownIt({ html: false, linkify: false, breaks: false });
+imageScanMd.validateLink = () => true;
+const imageRuleParser = new MarkdownIt();
+imageRuleParser.inline.ruler.enableOnly('image');
+const parseImage = imageRuleParser.inline.ruler.getRules('')[0];
 const MAX_LOCAL_HOME_LINK_REPAIRS = 256;
 /** Keep structured replies readable without letting heading-heavy model output
  *  multiply schema-v2 body elements without bound. Each promoted heading can
@@ -143,9 +160,9 @@ export interface CardUsageSnapshot {
     in: number;
     out: number;
   } | null;
-  /** Latest executor-reported model. Rendered by session-status cards only. */
+  /** Observed runtime model, or the configured launch model when unavailable. */
   model?: string;
-  /** Latest executor-reported reasoning effort. */
+  /** Observed reasoning effort, or the configured session effort when unavailable. */
   reasoningEffort?: string;
   /** Session-only configuration; separate from the last executor-reported effort. */
   reasoningControl?: {
@@ -564,29 +581,22 @@ export function cardUsageFooterSegment(
       + `↑${compactTokenCount(usage.tokens.in)} ↓${compactTokenCount(usage.tokens.out)}`,
     );
   }
-  // Runtime identity is formatted separately by cardUsageRuntimeSegment, then
-  // the streaming card appends it to this metric string with ` · ` in one
-  // continuous markdown paragraph. Keep this function metric-only so reply-card
-  // footers remain unchanged and the streaming renderer owns the tail layout.
+  // Runtime identity is formatted separately by cardUsageRuntimeSegment. Keep
+  // this function metric-only so callers can also render identity without usage.
   return parts.length > 0 ? parts.join(' · ') : null;
 }
 
-/** Streaming-card runtime tail appended after
- * {@link cardUsageFooterSegment}'s metric text. Returns `**model** variant · effort`
- * (model bolded within the shared grey markdown) or null when there is no model.
- * `effort` is dropped when absent — no placeholder. `hasMetrics` prevents a
- * standalone runtime-only row when native usage is unavailable. The
- * model↔effort join uses a non-breaking space so the pair never wraps apart. */
+/** Runtime identity shared by status and reply cards, independent of metrics.
+ * Missing model/effort is never guessed. Keep the selected model ID intact
+ * within the label budget: CLIs such as Cursor encode effort in that ID. */
 export function cardUsageRuntimeSegment(
   usage: CardUsageSnapshot,
-  hasMetrics: boolean,
 ): string | null {
-  if (!hasMetrics) return null;
   // Strip a leading `provider/` routing prefix (e.g. `model_hub/es1_orange_o48`
   // \u2192 `es1_orange_o48`) so the card shows the bare model name, not the relay's
   // internal namespace. A value with no slash (e.g. `gpt-5.6-sol`) is untouched.
   // Keep the tail compact so the continuous usage paragraph wraps predictably.
-  const model = compactRuntimeLabel(stripModelProviderPrefix(usage.model), 20);
+  const model = compactRuntimeLabel(stripModelProviderPrefix(usage.model), 64);
   if (!model) return null;
   const variant = usage.modelBackendVariant === 'standard'
     ? 'Standard'
@@ -688,27 +698,32 @@ export function buildReplyCardFooter(opts: {
   usage?: CardUsageSnapshot;
   executionDurationMs?: number;
   waitingDurationMs?: number;
+  presentation?: ReplyCardPresentation;
   locale?: Locale;
 }): ReplyCardFooter | null {
+  const policy = resolveReplyFooterPolicy(opts.presentation?.footerPreferences);
+  if (!policy.enabled) return null;
   const parts: string[] = [];
-  const brandSeg = brandFooterSegment(opts.brand);
+  const brandSeg = !policy.brand ? null : brandFooterSegment(opts.brand);
   if (brandSeg) parts.push(brandSeg);
   let hasUsage = false;
   if (opts.usage) {
-    const usageSeg = cardUsageFooterSegment(opts.usage, opts.locale);
+    const usageSeg = !policy.usage ? null : cardUsageFooterSegment(opts.usage, opts.locale);
     if (usageSeg) { parts.push(usageSeg); hasUsage = true; }
+    const runtimeSeg = !policy.model ? null : cardUsageRuntimeSegment(opts.usage);
+    if (runtimeSeg) { parts.push(runtimeSeg); hasUsage = true; }
   }
-  const durationMs = opts.executionDurationMs;
+  const durationMs = opts.presentation?.timing?.executionDurationMs ?? opts.executionDurationMs;
   const hasDuration = typeof durationMs === 'number' && Number.isFinite(durationMs) && durationMs >= 0;
-  const waitingMs = opts.waitingDurationMs;
+  const waitingMs = opts.presentation?.timing?.waitingDurationMs ?? opts.waitingDurationMs;
   const hasWaiting = typeof waitingMs === 'number' && Number.isFinite(waitingMs) && waitingMs >= 0;
   if (hasWaiting) {
     parts.push(t('card.waiting_duration', { seconds: (waitingMs / 1000).toFixed(1) }, opts.locale));
   }
   if (hasDuration) {
-    parts.push(t('card.execution_duration', { seconds: (durationMs / 1000).toFixed(1) }, opts.locale));
+    parts.push(t(opts.presentation?.timing?.executionInProgress ? 'card.execution_until_reply' : 'card.execution_duration', { seconds: (durationMs / 1000).toFixed(1) }, opts.locale));
   }
-  const recipientOpenIds = [...new Set((opts.recipientOpenIds ?? []).filter(Boolean))];
+  const recipientOpenIds = !policy.recipients ? [] : [...new Set((opts.recipientOpenIds ?? []).filter(Boolean))];
   const hasRecipient = recipientOpenIds.length > 0;
   if (hasRecipient) {
     parts.push(
@@ -752,6 +767,23 @@ export function buildReplyCardFooter(opts: {
   };
 }
 
+/** Compose the entire footer once: text, divider and optional voice action. */
+export function buildReplyCardFooterElements(
+  opts: Parameters<typeof buildReplyCardFooter>[0] & { voiceButton?: Record<string, unknown> },
+): any[] {
+  const policy = resolveReplyFooterPolicy(opts.presentation?.footerPreferences);
+  if (!policy.enabled) return [];
+  const footer = buildReplyCardFooter(opts);
+  const voice = policy.voice ? opts.voiceButton : undefined;
+  if (!footer && !voice) return [];
+  return [{ tag: 'hr' }, ...(voice ? [{
+    tag: 'column_set', flex_mode: 'none', horizontal_spacing: 'default', columns: [
+      { tag: 'column', width: 'weighted', weight: 1, vertical_align: 'center', elements: [footer?.element ?? { tag: 'markdown', text_size: 'notation', content: ' ' }] },
+      { tag: 'column', width: 'auto', vertical_align: 'center', elements: [voice] },
+    ],
+  }] : [footer!.element])];
+}
+
 /** Clone a caller-supplied schema-2 card and append the canonical reply
  * footer. Returns null for cards without a v2 `body.elements` array or when a
  * caller-owned element already occupies the globally unique footer id. */
@@ -778,8 +810,7 @@ export function appendReplyCardFooterToV2Card(
   ) {
     return null;
   }
-  const footer = buildReplyCardFooter(opts);
-  if (footer) body.elements.push({ tag: 'hr' }, footer.element);
+  body.elements.push(...buildReplyCardFooterElements(opts));
   return cloned;
 }
 
@@ -890,6 +921,79 @@ function unescapeFenceLines(input: string): string {
   return input.replace(/^[ ]{0,3}(?:\\`){3,}[^\n`]*$/gm, m => m.replace(/\\`/g, '`'));
 }
 
+/** Resolve real Markdown images, preserving code examples and untouched source.
+ * The image-only rule supplies exact source spans; the full parser above
+ * decides which occurrences are actually images rather than literal code. */
+export async function resolveCardMarkdownImages(
+  input: string,
+  resolveSource: (source: string) => Promise<string | undefined>,
+): Promise<string> {
+  input = unescapeFenceLines(input);
+  const references = cardMarkdownImageReferences(input);
+  if (!references.length) return input;
+  const env: Record<string, unknown> = {};
+  imageScanMd.parse(input, env);
+  const parts: string[] = [];
+  let cursor = 0;
+  for (const reference of references) {
+    if (reference.position < cursor || FEISHU_IMG_KEY.test(reference.source)) continue;
+    const state = new StateInline(input, imageScanMd, env, []);
+    state.pos = reference.position;
+    if (!parseImage(state, false)) continue;
+    const token = state.tokens.at(-1);
+    if (token?.type !== 'image' || token.attrGet('src') !== reference.source) continue;
+    const key = await resolveSource(reference.source);
+    if (!key || !FEISHU_IMG_KEY.test(key)) continue;
+    parts.push(input.slice(cursor, reference.position), `![${token.content}](${key})`);
+    cursor = state.pos;
+  }
+  return parts.join('') + input.slice(cursor);
+}
+
+function normalizeCardImages(input: string, omitAll = false): string {
+  const unsupported = new Set(cardMarkdownImageReferences(input)
+    .filter(image => omitAll || !FEISHU_IMG_KEY.test(image.source)).map(image => image.position));
+  return input.replace(/!\[/g, (match: string, offset: number) =>
+    unsupported.has(offset) ? '[Image omitted] [' : match);
+}
+
+/** Last-resort image-free version of a rejected reply card. Keep the card
+ * envelope, text, tables, code and controls so existing delivery accounting
+ * can continue to use the same message type and provider UUID. */
+export function omitReplyCardImages(cardJson: string): string {
+  let card: unknown;
+  try { card = JSON.parse(cardJson); } catch { return cardJson; }
+  let changed = false;
+  const visit = (value: unknown, markdownFields?: ReadonlySet<string>): unknown => {
+    if (Array.isArray(value)) return value.map(child => visit(child, markdownFields));
+    if (!value || typeof value !== 'object') return value;
+    if ('tag' in value && value.tag === 'img') {
+      changed = true;
+      const alt = 'alt' in value ? value.alt : undefined;
+      const text = typeof alt === 'string' ? alt
+        : alt && typeof alt === 'object' && 'content' in alt && typeof alt.content === 'string'
+          ? alt.content : '';
+      return { tag: 'markdown', content: `[Image omitted] ${md.utils.escapeHtml(text).replace(/[\\`*_[\]<>!]/g, '\\$&')}`.trim() };
+    }
+    const tableFields = 'tag' in value && value.tag === 'table' && 'columns' in value && Array.isArray(value.columns)
+      ? new Set<string>(value.columns.flatMap((column: unknown) =>
+        column && typeof column === 'object' && 'data_type' in column && column.data_type === 'lark_md'
+          && 'name' in column && typeof column.name === 'string' ? [column.name] : []))
+      : undefined;
+    return Object.fromEntries(Object.entries(value).map(([key, child]) => {
+      if (typeof child === 'string' && (markdownFields?.has(key)
+        || ('tag' in value && (value.tag === 'markdown' || value.tag === 'lark_md') && key === 'content'))) {
+        const content = normalizeCardImages(child, true);
+        if (content !== child) changed = true;
+        return [key, content];
+      }
+      return [key, visit(child, key === 'rows' ? tableFields : undefined)];
+    }));
+  };
+  const result = visit(card);
+  return changed ? JSON.stringify(result) : cardJson;
+}
+
 /** Normalize source bytes that must be settled before the card is rendered. */
 export function prepareCardMarkdown(
   input: string,
@@ -960,7 +1064,7 @@ export function extractFirstReplyCardHeading(input: string): ExtractedReplyCardH
  *      markdown widget doesn't render ATX `#`).
  *   3. Code fences → re-emitted with the original backtick run, joined with
  *      blank lines on either side (Feishu's widget needs them to recognise the
- *      fence).
+ *      fence). Code nested in lists/quotes becomes a standalone element.
  *   4. Everything else → original source slice, glued by blank lines.
  *
  * Prose between promoted headings/tables/image rows is merged into one
@@ -977,6 +1081,9 @@ export function buildCardBodyElements(
   // Recover model-escaped fences first so markdown-it can classify their
   // contents as code before local-link normalization inspects link tokens.
   input = prepareCardMarkdown(input, cwd, localHomeLinkMode);
+  // Only sanitize at the rendering boundary: sandbox relay preparation runs
+  // before --images uploads resolve img:N placeholders to real image keys.
+  input = normalizeCardImages(input);
   // Pre-pass: a line that is nothing but 2+ images renders as a side-by-side
   // image row (column_set) instead of stacked full-width images. Everything
   // else flows through the markdown element builder unchanged. Fence-aware so
@@ -1088,12 +1195,41 @@ function buildMarkdownElements(
       continue;
     }
 
-    // Generic open token (paragraph_open, bullet_list_open, ordered_list_open,
-    // blockquote_open, …): slice source by the open-token's line map and skip
-    // to the matching close.
+    // Lark can omit fences nested inside lists/quotes. Lift those code blocks
+    // into standalone elements; keep the surrounding source (and numbering)
+    // in order instead of handing the unsupported container to its renderer.
     if (t.type.endsWith('_open') && t.map) {
-      buf.push(sliceLines(lines, t.map as [number, number]));
-      i = findMatchingClose(tokens, i) + 1;
+      const end = findMatchingClose(tokens, i);
+      let startLine = t.map[0];
+      for (let nested = i + 1; nested < end; nested++) {
+        const code = tokens[nested];
+        // A continuation paragraph has lost its opening list item/quote in
+        // the previous element. Use the parsed text so its old indentation
+        // cannot turn prose into an accidental indented code block.
+        if (startLine > t.map[0] && code.type === 'paragraph_open' && code.map
+          && tokens[nested - 1].nesting !== 1) {
+          buf.push(sliceLines(lines, [startLine, code.map[0]]));
+          buf.push(tokens[nested + 1].content);
+          startLine = code.map[1];
+          continue;
+        }
+        if ((code.type !== 'fence' && code.type !== 'code_block') || !code.map) continue;
+        buf.push(sliceLines(lines, [startLine, code.map[0]]));
+        flushBuf();
+        const info = (code.info || '').trim();
+        if (code.type === 'fence' && VEGA_LITE_FENCE_LANGS.has(info.split(/\s+/)[0]!.toLowerCase())) {
+          elements.push(...buildVegaLiteElements(code.content, layoutBudget));
+        } else {
+          const fence = code.markup || '`'.repeat(Math.max(3,
+            ...(code.content.match(/`+/g) ?? []).map(run => run.length + 1)));
+          // Do not run code through flushBuf: its prose whitespace cleanup
+          // would collapse intentional blank lines inside the code block.
+          elements.push({ tag: 'markdown', content: `${fence}${info}\n${code.content}${fence}` });
+        }
+        startLine = code.map[1];
+      }
+      buf.push(sliceLines(lines, [startLine, t.map[1]]));
+      i = end + 1;
       continue;
     }
 
@@ -1262,11 +1398,8 @@ const IMG_ROW_LINE = /^ {0,3}(?:!\[[^\]]*\]\([^)\s]+\)\s*){2,}$/;
  * such key is promoted to a native `img` row — a model reply may emit a
  * `![](https://…) ![](…)` URL line (or other non-key src like `img_v2foo.png`),
  * and a native `img` element with a non-key as its "img_key" makes Feishu reject
- * the whole card. Non-key lines fall through to the markdown widget unchanged
- * (same as before this feature existed).
+ * the whole card. Non-key images are downgraded before this layout pass.
  */
-const FEISHU_IMG_KEY = /^img_v\d+_[A-Za-z0-9_-]+$/i;
-
 type BodySegment = { type: 'text'; content: string } | { type: 'imgrow'; keys: string[] } | { type: 'img'; key: string; alt: string };
 
 /**
@@ -1430,19 +1563,18 @@ export function buildMarkdownCard(
   workingDir?: string,
   localHomeLinkMode: LocalHomeLinkMode = 'filesystem',
   usage?: CardUsageSnapshot,
+  presentation?: ReplyCardPresentation,
 ): string {
   const elements = md ? buildCardBodyElements(md, workingDir, localHomeLinkMode) : [];
-  const footer = buildReplyCardFooter({
+  const footerElements = buildReplyCardFooterElements({
     brand,
     recipientOpenIds: recipientOpenId ? [recipientOpenId] : [],
     usage,
     locale,
+    presentation,
   });
   // No brand, usage, or recipient → no footer at all (skip the orphan HR too).
-  if (footer) {
-    elements.push({ tag: 'hr' });
-    elements.push(footer.element);
-  }
+  elements.push(...footerElements);
   const card = createReplyCard(elements);
   fitBuiltCard(card, 'markdown_card');
   return JSON.stringify(card);
@@ -1453,6 +1585,7 @@ export function buildMarkdownCard(
 export function buildCanonicalFinalReplyCard(opts: {
   markdown: string;
   feedback?: { policy: FeedbackPolicy };
+  completionProposal?: CompletionProposalRecord;
   recipientOpenId?: string;
   brand?: string;
   locale?: Locale;
@@ -1461,21 +1594,28 @@ export function buildCanonicalFinalReplyCard(opts: {
   usage?: CardUsageSnapshot;
   executionDurationMs?: number;
   waitingDurationMs?: number;
+  presentation?: ReplyCardPresentation;
 }): string {
   const elements = opts.markdown
     ? buildCardBodyElements(opts.markdown, opts.workingDir, opts.localHomeLinkMode ?? 'filesystem')
     : [];
-  if (opts.feedback) elements.push(buildFeedbackElement(opts.feedback.policy));
-  const footer = buildReplyCardFooter({
+  const footerElements = buildReplyCardFooterElements({
     brand: opts.brand,
     recipientOpenIds: opts.recipientOpenId ? [opts.recipientOpenId] : [],
     usage: opts.usage,
+    presentation: opts.presentation,
     executionDurationMs: opts.executionDurationMs,
     waitingDurationMs: opts.waitingDurationMs,
     locale: opts.locale,
   });
-  if (footer) elements.push({ tag: 'hr' }, footer.element);
+  elements.push(...footerElements);
   const card = createReplyCard(elements);
+  composeFinalCardSections(card, {
+    ...(opts.completionProposal
+      ? { completionProposal: buildCompletionProposalElement(opts.completionProposal) }
+      : {}),
+    ...(opts.feedback ? { feedback: buildFeedbackElement(opts.feedback.policy) } : {}),
+  });
   fitBuiltCard(card, 'final_reply');
   return JSON.stringify(card);
 }
@@ -1517,6 +1657,7 @@ export function buildContextualReplyCard(opts: {
   usage?: CardUsageSnapshot;
   executionDurationMs?: number;
   waitingDurationMs?: number;
+  presentation?: ReplyCardPresentation;
   feedback?: { policy: FeedbackPolicy };
 }): string {
   const {
@@ -1543,7 +1684,7 @@ export function buildContextualReplyCard(opts: {
     const u = userText.trim();
     elements.push({
       tag: 'markdown',
-      content: `**👤 ${t('card.you', undefined, locale)}**\n\n${quoteLines(u || t('common.empty_paren', undefined, locale))}`,
+      content: normalizeCardImages(`**👤 ${t('card.you', undefined, locale)}**\n\n${quoteLines(u || t('common.empty_paren', undefined, locale))}`),
     });
   }
 
@@ -1560,18 +1701,16 @@ export function buildContextualReplyCard(opts: {
 
   if (opts.feedback) elements.push(buildFeedbackElement(opts.feedback.policy));
 
-  const footer = buildReplyCardFooter({
+  const footerElements = buildReplyCardFooterElements({
     brand,
     recipientOpenIds: recipientOpenId ? [recipientOpenId] : [],
     usage,
     locale,
     executionDurationMs: opts.executionDurationMs,
     waitingDurationMs: opts.waitingDurationMs,
+    presentation: opts.presentation,
   });
-  if (footer) {
-    elements.push({ tag: 'hr' });
-    elements.push(footer.element);
-  }
+  elements.push(...footerElements);
 
   const card = createReplyCard(elements);
   fitBuiltCard(card, 'contextual_reply');
