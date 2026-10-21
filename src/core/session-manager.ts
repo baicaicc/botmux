@@ -30,6 +30,7 @@ import {
   builtinSkillEntries,
   buildBuiltinSkillCatalogBlock,
   builtinSkillHelpPointer,
+  chatManagerEnabledForApp,
 } from '../skills/injection-mode.js';
 import { resolveConditionalLine } from '../skills/effective-builtins.js';
 import {
@@ -78,7 +79,7 @@ import {
   storedSessionAnchorId,
   larkTransportEnabled,
 } from './types.js';
-import type { DaemonSession } from './types.js';
+import type { DaemonSession, GroupJoinContext } from './types.js';
 import { stagePendingRepoSetup, persistPendingRepoCardMessageId, restorePendingRepoRuntime } from './pending-repo-journal.js';
 import { announceSessionRow, markSessionActivity, announcePendingRepoSession } from './session-activity.js';
 import { applyFollowActive, followActiveOpenedFreshTopic, recordFollowActiveFreshTopic } from './schedule-follow-active.js';
@@ -777,6 +778,20 @@ function renderChatContextBlock(chatContext?: ChatContext): string {
   ].join('\n');
 }
 
+function renderGroupJoinContextBlock(context?: GroupJoinContext): string {
+  if (!context) return '';
+  return [
+    `<botmux_group_join source="lark" trusted="true" event="${context.event}" gate_matched="${context.gateMatched}">`,
+    `  <lark_app_id>${xmlEscape(context.larkAppId)}</lark_app_id>`,
+    `  <chat_id>${xmlEscape(context.chatId)}</chat_id>`,
+    `  <turn_id>${xmlEscape(context.turnId)}</turn_id>`,
+    ...(context.operatorOpenId
+      ? [`  <operator_open_id>${xmlEscape(context.operatorOpenId)}</operator_open_id>`]
+      : []),
+    '</botmux_group_join>',
+  ].join('\n');
+}
+
 /**
  * Whether this bot injects the `<sender>` tag. Default ON: an unreadable bot
  * (getBot throws for an unknown appId) or an absent key both mean "inject",
@@ -1280,6 +1295,7 @@ type NewTopicOpts = {
   whiteboardId?: string;
   substituteTrigger?: SubstituteTrigger;
   chatContext?: ChatContext;
+  groupJoinContext?: GroupJoinContext;
   sharedGroupContext?: string;
   turnId?: string;
   sessionBackendType?: BackendType;
@@ -1299,7 +1315,7 @@ type NewTopicOpts = {
 };
 
 type NewTopicBlockKey = 'routing' | 'skill' | 'identity' | 'credentials' | 'sessionId' | 'role'
-  | 'summaryMemory' | 'whiteboard' | 'chatContextPolicy' | 'chatContext' | 'groupHistory'
+  | 'summaryMemory' | 'whiteboard' | 'groupJoin' | 'chatContextPolicy' | 'chatContext' | 'groupHistory'
   | 'userMessage' | 'sender' | 'substitute' | 'senderNote' | 'attachments'
   | 'mentions' | 'availableBots';
 
@@ -1377,7 +1393,12 @@ function buildNewTopicBlocks(
     if (mode === 'prompt') {
       // history/quoted/bots are fully covered by <botmux_routing>; send stays in
       // the catalog as a compact trigger for complex delivery and safety rules.
-      const entries = builtinSkillEntries({ asksViaHook: adapter.asksViaHook, whiteboardEnabled: whiteboardEnabled(), excludeRoutingCovered: true });
+      const entries = builtinSkillEntries({
+        asksViaHook: adapter.asksViaHook,
+        whiteboardEnabled: whiteboardEnabled(),
+        chatManagerEnabled: chatManagerEnabledForApp(opts?.larkAppId),
+        excludeRoutingCovered: true,
+      });
       skillBlock = buildBuiltinSkillCatalogBlock(entries, locale);
     } else if (mode === 'off') {
       skillBlock = builtinSkillHelpPointer(locale);
@@ -1414,6 +1435,7 @@ function buildNewTopicBlocks(
     locale,
   });
   const summaryMemoryBlock = renderSummaryMemoryBlock(opts?.larkAppId, locale);
+  const groupJoinContextBlock = renderGroupJoinContextBlock(opts?.groupJoinContext);
   const chatContextPolicyBlock = renderChatContextPolicyBlock(opts?.chatContext, locale);
   const chatContextBlock = renderChatContextBlock(opts?.chatContext);
 
@@ -1478,6 +1500,7 @@ function buildNewTopicBlocks(
   if (roleBlock) blocks.push({ key: 'role', text: roleBlock });
   if (summaryMemoryBlock) blocks.push({ key: 'summaryMemory', text: summaryMemoryBlock });
   if (whiteboardBlock) blocks.push({ key: 'whiteboard', text: whiteboardBlock });
+  if (groupJoinContextBlock) blocks.push({ key: 'groupJoin', text: groupJoinContextBlock });
   if (chatContextPolicyBlock) blocks.push({ key: 'chatContextPolicy', text: chatContextPolicyBlock });
   if (chatContextBlock) blocks.push({ key: 'chatContext', text: chatContextBlock });
   if (opts?.sharedGroupContext) blocks.push({ key: 'groupHistory', text: opts.sharedGroupContext });
@@ -1557,6 +1580,7 @@ export function buildNewTopicCliInput(
     codexAppFollowUps?: string[];
     codexAppFollowUpContexts?: string[];
     chatContext?: ChatContext;
+    groupJoinContext?: GroupJoinContext;
     sharedGroupContext?: string;
     /** Host-resolved identity for this turn. Only the caller knows where the
      *  turn came from, so it is passed in rather than derived here. */
@@ -1631,6 +1655,7 @@ export function buildNewTopicCliInput(
     locale,
   });
   const summaryMemoryBlock = renderSummaryMemoryBlock(opts?.larkAppId, locale);
+  const groupJoinContextBlock = renderGroupJoinContextBlock(opts?.groupJoinContext);
   const senderBlock = renderSenderTag(sender, opts?.larkAppId);
   const substitutePolicyBlock = renderSubstitutePolicy(opts?.substituteTrigger);
   const substituteTargetBlock = renderSubstituteTarget(opts?.substituteTrigger);
@@ -1644,7 +1669,7 @@ export function buildNewTopicCliInput(
     ...(opts?.trustedCaller ? { trustedCaller: opts.trustedCaller } : {}),
     codexAppInput: buildCodexAppTurnInput({
       text: [opts?.codexAppText ?? userMessage, ...(opts?.codexAppFollowUps ?? [])].join('\n\n'),
-      roleBlock: [roleBlock, summaryMemoryBlock].filter(Boolean).join('\n\n'),
+      roleBlock: [roleBlock, summaryMemoryBlock, groupJoinContextBlock].filter(Boolean).join('\n\n'),
       whiteboardBlock,
       senderBlock,
       substitutePolicyBlock,
@@ -4977,6 +5002,8 @@ async function forkOrShowRepoCard(
     ds.pendingCodexAppApplicationContext = undefined;
     ds.pendingCodexAppMessageContext = undefined;
     ds.pendingChatContext = undefined;
+    ds.pendingGroupJoinContext = undefined;
+    ds.pendingTrustedCaller = undefined;
     ds.pendingAttachments = undefined;
     ds.pendingMentions = undefined;
     ds.pendingSender = undefined;
