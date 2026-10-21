@@ -279,6 +279,19 @@ export interface DaemonSession {
    * In-memory only; not persisted.
    */
   consumedRepoCardMessageIds?: string[];
+  /**
+   * The session's working directory was gone when a CLI start was attempted
+   * (forkWorker refuses instead of starting it elsewhere), and a recovery card
+   * was published for it. `cardMessageId` is unset while that card is still
+   * being built. `rebuild` is where the deleted worktree came from, when git
+   * still knows. In-memory only: after a restart the next refused start
+   * publishes a fresh card.
+   */
+  workingDirRecovery?: {
+    path: string;
+    cardMessageId?: string;
+    rebuild?: { repo: string; branch: string };
+  };
   worktreeCreating?: boolean;    // a worktree-open is in flight — dedups repeated card clicks / `/repo wt`
   pendingPrompt?: string;        // original user message to send after repo is selected
   /** Exact Lark message id whose user input is waiting for the first worker

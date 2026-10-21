@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { applyQueuedCodexAppLegacyFallback } from '../src/core/session-create.js';
 
 const {
@@ -224,6 +224,7 @@ import {
   setActiveSessionsRegistry,
   suspendWorker,
 } from '../src/core/worker-pool.js';
+import { MissingWorkingDirError } from '../src/core/working-dir-recovery.js';
 import {
   awaitReadonlyTaskContinuationUser,
   cancelReadonlyTaskContinuationExplicit,
@@ -250,6 +251,13 @@ import { mkdtempSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { join } from 'node:path';
 
+// The session working directory these fixtures point at. It must exist:
+// forkWorker refuses to start a CLI whose directory is gone (it no longer falls
+// back to $HOME), and a fixed path like `/repo` exists on some hosts but not on
+// CI, which is how a missing-directory failure once hid behind a green local run.
+const REPO = mkdtempSync(join(tmpdir(), 'botmux-lifecycle-repo-'));
+afterAll(() => { rmSync(REPO, { recursive: true, force: true }); });
+
 function makeFakeWorker() {
   const worker = new EventEmitter() as any;
   worker.killed = false;
@@ -271,7 +279,7 @@ function makeDs(overrides?: Partial<DaemonSession>): DaemonSession {
       status: 'active',
       createdAt: new Date('2026-05-27T00:00:00.000Z').toISOString(),
       chatType: 'group',
-      workingDir: '/repo',
+      workingDir: REPO,
     },
     worker: null,
     workerPort: null,
@@ -284,7 +292,7 @@ function makeDs(overrides?: Partial<DaemonSession>): DaemonSession {
     cliVersion: '1.0',
     lastMessageAt: 5678,
     hasHistory: false,
-    workingDir: '/repo',
+    workingDir: REPO,
     ...overrides,
   } as DaemonSession;
 }
@@ -335,7 +343,7 @@ beforeEach(() => {
   });
   initWorkerPool({
     sessionReply: vi.fn(async () => 'om_reply'),
-    getSessionWorkingDir: () => '/repo',
+    getSessionWorkingDir: () => REPO,
     getActiveCount: () => 1,
     closeSession: vi.fn(),
   });
@@ -380,7 +388,7 @@ describe('host memory pressure worker admission', () => {
     const sessionReply = vi.fn(async () => 'om_pressure');
     initWorkerPool({
       sessionReply,
-      getSessionWorkingDir: () => '/repo',
+      getSessionWorkingDir: () => REPO,
       getActiveCount: () => 1,
       closeSession: vi.fn(),
     });
@@ -425,7 +433,7 @@ describe('host memory pressure worker admission', () => {
     const sessionReply = vi.fn(async () => 'om_pressure');
     initWorkerPool({
       sessionReply,
-      getSessionWorkingDir: () => '/repo',
+      getSessionWorkingDir: () => REPO,
       getActiveCount: () => 1,
       closeSession: vi.fn(),
     });
@@ -540,7 +548,7 @@ describe('host memory pressure worker admission', () => {
     const sessionReply = vi.fn(async () => 'om_reply');
     initWorkerPool({
       sessionReply,
-      getSessionWorkingDir: () => '/repo',
+      getSessionWorkingDir: () => REPO,
       getActiveCount: () => 1,
       closeSession: vi.fn(),
     });
@@ -578,7 +586,7 @@ describe('host memory pressure worker admission', () => {
     vi.useFakeTimers();
     initWorkerPool({
       sessionReply: vi.fn(async () => 'om_reply'),
-      getSessionWorkingDir: () => '/repo',
+      getSessionWorkingDir: () => REPO,
       getActiveCount: () => 1,
       closeSession: vi.fn(),
     });
@@ -623,7 +631,7 @@ describe('host memory pressure worker admission', () => {
     vi.useFakeTimers();
     initWorkerPool({
       sessionReply: vi.fn(async () => 'om_reply'),
-      getSessionWorkingDir: () => '/repo',
+      getSessionWorkingDir: () => REPO,
       getActiveCount: () => 1,
       closeSession: vi.fn(),
     });
@@ -668,7 +676,7 @@ describe('host memory pressure worker admission', () => {
     const sessionReply = vi.fn(async () => 'om_reply');
     initWorkerPool({
       sessionReply,
-      getSessionWorkingDir: () => '/repo',
+      getSessionWorkingDir: () => REPO,
       getActiveCount: () => 1,
       closeSession: vi.fn(),
     });
@@ -717,7 +725,7 @@ describe('host memory pressure worker admission', () => {
     const sessionReply = vi.fn(async () => 'om_blocked');
     initWorkerPool({
       sessionReply,
-      getSessionWorkingDir: () => '/repo',
+      getSessionWorkingDir: () => REPO,
       getActiveCount: () => 1,
       closeSession: vi.fn(),
     });
@@ -758,7 +766,7 @@ describe('host memory pressure worker admission', () => {
     const sessionReply = vi.fn(async () => 'om_reply');
     initWorkerPool({
       sessionReply,
-      getSessionWorkingDir: () => '/repo',
+      getSessionWorkingDir: () => REPO,
       getActiveCount: () => 1,
       closeSession: vi.fn(),
     });
@@ -808,7 +816,7 @@ describe('host memory pressure worker admission', () => {
     const sessionReply = vi.fn(async () => 'om_blocked');
     initWorkerPool({
       sessionReply,
-      getSessionWorkingDir: () => '/repo',
+      getSessionWorkingDir: () => REPO,
       getActiveCount: () => 1,
       closeSession: vi.fn(),
     });
@@ -856,7 +864,7 @@ describe('ordinary IM worker receipt acknowledgement', () => {
   it('propagates durable-primary attribution through the actual fork init message', () => {
     initWorkerPool({
       sessionReply: vi.fn(async () => 'om_reply'),
-      getSessionWorkingDir: () => '/repo',
+      getSessionWorkingDir: () => REPO,
       getActiveCount: () => 1,
       closeSession: vi.fn(),
     });
@@ -883,7 +891,7 @@ describe('ordinary IM worker receipt acknowledgement', () => {
     const sessionReply = vi.fn(async () => 'om_reply');
     initWorkerPool({
       sessionReply,
-      getSessionWorkingDir: () => '/repo',
+      getSessionWorkingDir: () => REPO,
       getActiveCount: () => 1,
       closeSession: vi.fn(),
     });
@@ -919,7 +927,7 @@ describe('ordinary IM worker receipt acknowledgement', () => {
     const sessionReply = vi.fn(async () => 'om_reply');
     initWorkerPool({
       sessionReply,
-      getSessionWorkingDir: () => '/repo',
+      getSessionWorkingDir: () => REPO,
       getActiveCount: () => 1,
       closeSession: vi.fn(),
     });
@@ -952,7 +960,7 @@ describe('ordinary IM worker receipt acknowledgement', () => {
     const sessionReply = vi.fn(async () => 'om_delayed');
     initWorkerPool({
       sessionReply,
-      getSessionWorkingDir: () => '/repo',
+      getSessionWorkingDir: () => REPO,
       getActiveCount: () => 1,
       closeSession: vi.fn(),
     });
@@ -987,7 +995,7 @@ describe('ordinary IM worker receipt acknowledgement', () => {
     const sessionReply = vi.fn(async () => 'om_reply');
     initWorkerPool({
       sessionReply,
-      getSessionWorkingDir: () => '/repo',
+      getSessionWorkingDir: () => REPO,
       getActiveCount: () => 1,
       closeSession: vi.fn(),
     });
@@ -1019,7 +1027,7 @@ describe('ordinary IM worker receipt acknowledgement', () => {
     const sessionReply = vi.fn(async () => 'om_delayed');
     initWorkerPool({
       sessionReply,
-      getSessionWorkingDir: () => '/repo',
+      getSessionWorkingDir: () => REPO,
       getActiveCount: () => 1,
       closeSession: vi.fn(),
     });
@@ -1051,7 +1059,7 @@ describe('ordinary IM worker receipt acknowledgement', () => {
     const sessionReply = vi.fn(async () => 'om_delayed');
     initWorkerPool({
       sessionReply,
-      getSessionWorkingDir: () => '/repo',
+      getSessionWorkingDir: () => REPO,
       getActiveCount: () => 1,
       closeSession: vi.fn(),
     });
@@ -1081,7 +1089,7 @@ describe('ordinary IM worker receipt acknowledgement', () => {
     const sessionReply = vi.fn(async () => 'om_delayed');
     initWorkerPool({
       sessionReply,
-      getSessionWorkingDir: () => '/repo',
+      getSessionWorkingDir: () => REPO,
       getActiveCount: () => 1,
       closeSession: vi.fn(),
     });
@@ -1113,7 +1121,7 @@ describe('ordinary IM worker receipt acknowledgement', () => {
     const sessionReply = vi.fn(async () => 'om_reply');
     initWorkerPool({
       sessionReply,
-      getSessionWorkingDir: () => '/repo',
+      getSessionWorkingDir: () => REPO,
       getActiveCount: () => 1,
       closeSession: vi.fn(),
     });
@@ -1169,7 +1177,7 @@ describe('ordinary IM worker receipt acknowledgement', () => {
     const onOrdinaryImInputRejected = vi.fn(async () => false);
     initWorkerPool({
       sessionReply,
-      getSessionWorkingDir: () => '/repo',
+      getSessionWorkingDir: () => REPO,
       getActiveCount: () => 1,
       closeSession: vi.fn(),
       onOrdinaryImInputRejected,
@@ -1252,7 +1260,7 @@ describe('ordinary IM worker receipt acknowledgement', () => {
     });
     initWorkerPool({
       sessionReply,
-      getSessionWorkingDir: () => '/repo',
+      getSessionWorkingDir: () => REPO,
       getActiveCount: () => 1,
       closeSession: vi.fn(),
       onOrdinaryImInputRejected,
@@ -1337,7 +1345,7 @@ describe('ordinary IM worker receipt acknowledgement', () => {
     const sessionReply = vi.fn(async () => 'om_failure');
     initWorkerPool({
       sessionReply,
-      getSessionWorkingDir: () => '/repo',
+      getSessionWorkingDir: () => REPO,
       getActiveCount: () => 1,
       closeSession: vi.fn(),
     });
@@ -1372,7 +1380,7 @@ describe('ordinary IM worker receipt acknowledgement', () => {
     const sessionReply = vi.fn(async () => 'om_delayed');
     initWorkerPool({
       sessionReply,
-      getSessionWorkingDir: () => '/repo',
+      getSessionWorkingDir: () => REPO,
       getActiveCount: () => 1,
       closeSession: vi.fn(),
     });
@@ -1400,7 +1408,7 @@ describe('ordinary IM worker receipt acknowledgement', () => {
     const sessionReply = vi.fn(async () => 'om_failure');
     initWorkerPool({
       sessionReply,
-      getSessionWorkingDir: () => '/repo',
+      getSessionWorkingDir: () => REPO,
       getActiveCount: () => 1,
       closeSession: vi.fn(),
     });
@@ -1432,7 +1440,7 @@ describe('ordinary IM worker receipt acknowledgement', () => {
     const sessionReply = vi.fn(async () => 'om_delayed');
     initWorkerPool({
       sessionReply,
-      getSessionWorkingDir: () => '/repo',
+      getSessionWorkingDir: () => REPO,
       getActiveCount: () => 1,
       closeSession: vi.fn(),
     });
@@ -1464,7 +1472,7 @@ describe('ordinary IM worker receipt acknowledgement', () => {
     const sessionReply = vi.fn(async () => 'om_reply');
     initWorkerPool({
       sessionReply,
-      getSessionWorkingDir: () => '/repo',
+      getSessionWorkingDir: () => REPO,
       getActiveCount: () => 1,
       closeSession: vi.fn(),
     });
@@ -1494,7 +1502,7 @@ describe('ordinary IM worker receipt acknowledgement', () => {
     const sessionReply = vi.fn(async () => 'om_reply');
     initWorkerPool({
       sessionReply,
-      getSessionWorkingDir: () => '/repo',
+      getSessionWorkingDir: () => REPO,
       getActiveCount: () => 1,
       closeSession: vi.fn(),
     });
@@ -1527,7 +1535,7 @@ describe('ordinary IM worker receipt acknowledgement', () => {
     const sessionReply = vi.fn(async () => 'om_failure');
     initWorkerPool({
       sessionReply,
-      getSessionWorkingDir: () => '/repo',
+      getSessionWorkingDir: () => REPO,
       getActiveCount: () => 1,
       closeSession: vi.fn(),
     });
@@ -1555,7 +1563,7 @@ describe('ordinary IM worker receipt acknowledgement', () => {
     const sessionReply = vi.fn(async () => 'om_failure');
     initWorkerPool({
       sessionReply,
-      getSessionWorkingDir: () => '/repo',
+      getSessionWorkingDir: () => REPO,
       getActiveCount: () => 1,
       closeSession: vi.fn(),
     });
@@ -1580,7 +1588,7 @@ describe('ordinary IM worker receipt acknowledgement', () => {
     const sessionReply = vi.fn(async () => 'om_failure');
     initWorkerPool({
       sessionReply,
-      getSessionWorkingDir: () => '/repo',
+      getSessionWorkingDir: () => REPO,
       getActiveCount: () => 1,
       closeSession: vi.fn(),
     });
@@ -1610,7 +1618,7 @@ describe('ordinary IM worker receipt acknowledgement', () => {
     const sessionReply = vi.fn(async () => 'om_reply');
     initWorkerPool({
       sessionReply,
-      getSessionWorkingDir: () => '/repo',
+      getSessionWorkingDir: () => REPO,
       getActiveCount: () => 1,
       closeSession: vi.fn(),
     });
@@ -1646,7 +1654,7 @@ describe('ordinary IM worker receipt acknowledgement', () => {
     const sessionReply = vi.fn(async () => 'om_reply');
     initWorkerPool({
       sessionReply,
-      getSessionWorkingDir: () => '/repo',
+      getSessionWorkingDir: () => REPO,
       getActiveCount: () => 1,
       closeSession: vi.fn(),
     });
@@ -1682,7 +1690,7 @@ describe('ordinary IM worker receipt acknowledgement', () => {
     const sessionReply = vi.fn(async () => 'om_reply');
     initWorkerPool({
       sessionReply,
-      getSessionWorkingDir: () => '/repo',
+      getSessionWorkingDir: () => REPO,
       getActiveCount: () => 1,
       closeSession: vi.fn(),
     });
@@ -1715,7 +1723,7 @@ describe('ordinary IM worker receipt acknowledgement', () => {
     const sessionReply = vi.fn(async () => 'om_reply');
     initWorkerPool({
       sessionReply,
-      getSessionWorkingDir: () => '/repo',
+      getSessionWorkingDir: () => REPO,
       getActiveCount: () => 1,
       closeSession: vi.fn(),
     });
@@ -1745,7 +1753,7 @@ describe('ordinary IM worker receipt acknowledgement', () => {
     const sessionReply = vi.fn(async () => 'om_reply');
     initWorkerPool({
       sessionReply,
-      getSessionWorkingDir: () => '/repo',
+      getSessionWorkingDir: () => REPO,
       getActiveCount: () => 1,
       closeSession: vi.fn(),
     });
@@ -1774,7 +1782,7 @@ describe('ordinary IM worker receipt acknowledgement', () => {
     const sessionReply = vi.fn(async () => 'om_reply');
     initWorkerPool({
       sessionReply,
-      getSessionWorkingDir: () => '/repo',
+      getSessionWorkingDir: () => REPO,
       getActiveCount: () => 1,
       closeSession: vi.fn(),
     });
@@ -1815,7 +1823,7 @@ describe('ordinary IM worker receipt acknowledgement', () => {
     const sessionReply = vi.fn(async () => 'om_reply');
     initWorkerPool({
       sessionReply,
-      getSessionWorkingDir: () => '/repo',
+      getSessionWorkingDir: () => REPO,
       getActiveCount: () => 1,
       closeSession: vi.fn(),
     });
@@ -1846,7 +1854,7 @@ describe('ordinary IM worker receipt acknowledgement', () => {
     const sessionReply = vi.fn(async () => 'om_reply');
     initWorkerPool({
       sessionReply,
-      getSessionWorkingDir: () => '/repo',
+      getSessionWorkingDir: () => REPO,
       getActiveCount: () => 1,
       closeSession: vi.fn(),
     });
@@ -1871,7 +1879,7 @@ describe('ordinary IM worker receipt acknowledgement', () => {
     const sessionReply = vi.fn(async () => 'om_failure');
     initWorkerPool({
       sessionReply,
-      getSessionWorkingDir: () => '/repo',
+      getSessionWorkingDir: () => REPO,
       getActiveCount: () => 1,
       closeSession: vi.fn(),
     });
@@ -1917,7 +1925,7 @@ describe('ordinary IM worker receipt acknowledgement', () => {
     const sessionReply = vi.fn(async () => 'om_failure');
     initWorkerPool({
       sessionReply,
-      getSessionWorkingDir: () => '/repo',
+      getSessionWorkingDir: () => REPO,
       getActiveCount: () => 1,
       closeSession: vi.fn(),
     });
@@ -1945,7 +1953,7 @@ describe('ordinary IM worker receipt acknowledgement', () => {
     const sessionReply = vi.fn(async () => 'om_delayed');
     initWorkerPool({
       sessionReply,
-      getSessionWorkingDir: () => '/repo',
+      getSessionWorkingDir: () => REPO,
       getActiveCount: () => 1,
       closeSession: vi.fn(),
     });
@@ -1973,7 +1981,7 @@ describe('ordinary IM worker receipt acknowledgement', () => {
     const sessionReply = vi.fn(async () => 'om_failure');
     initWorkerPool({
       sessionReply,
-      getSessionWorkingDir: () => '/repo',
+      getSessionWorkingDir: () => REPO,
       getActiveCount: () => 1,
       closeSession: vi.fn(),
     });
@@ -1996,7 +2004,7 @@ describe('ordinary IM worker receipt acknowledgement', () => {
     const sessionReply = vi.fn(async () => 'om_delayed');
     initWorkerPool({
       sessionReply,
-      getSessionWorkingDir: () => '/repo',
+      getSessionWorkingDir: () => REPO,
       getActiveCount: () => 1,
       closeSession: vi.fn(),
     });
@@ -3003,7 +3011,7 @@ describe('TraeX task continuation', () => {
     const sessionReply = vi.fn(async () => 'om_readonly_final');
     initWorkerPool({
       sessionReply,
-      getSessionWorkingDir: () => '/repo',
+      getSessionWorkingDir: () => REPO,
       getActiveCount: () => 1,
       closeSession: vi.fn(),
     });
@@ -3070,7 +3078,7 @@ describe('TraeX task continuation', () => {
     const sessionReply = vi.fn(async () => 'om_recovered_final');
     initWorkerPool({
       sessionReply,
-      getSessionWorkingDir: () => '/repo',
+      getSessionWorkingDir: () => REPO,
       getActiveCount: () => 1,
       closeSession: vi.fn(),
     });
@@ -3124,7 +3132,7 @@ describe('TraeX task continuation', () => {
     });
     initWorkerPool({
       sessionReply,
-      getSessionWorkingDir: () => '/repo',
+      getSessionWorkingDir: () => REPO,
       getActiveCount: () => 1,
       closeSession: vi.fn(),
     });
@@ -3183,7 +3191,7 @@ describe('TraeX task continuation', () => {
     const sessionReply = vi.fn(async () => 'om_unexpected');
     initWorkerPool({
       sessionReply,
-      getSessionWorkingDir: () => '/repo',
+      getSessionWorkingDir: () => REPO,
       getActiveCount: () => 1,
       closeSession: vi.fn(),
     });
@@ -3225,7 +3233,7 @@ describe('TraeX task continuation', () => {
     const sessionReply = vi.fn(async () => 'om_disabled_recovered_warning');
     initWorkerPool({
       sessionReply,
-      getSessionWorkingDir: () => '/repo',
+      getSessionWorkingDir: () => REPO,
       getActiveCount: () => 1,
       closeSession: vi.fn(),
     });
@@ -3327,7 +3335,7 @@ describe('ordinary Claude semantic recovery', () => {
     const sessionReply = vi.fn(async () => 'om_warning');
     initWorkerPool({
       sessionReply,
-      getSessionWorkingDir: () => '/repo',
+      getSessionWorkingDir: () => REPO,
       getActiveCount: () => 1,
       closeSession: vi.fn(),
     });
@@ -3459,12 +3467,12 @@ describe('ordinary Claude semantic recovery', () => {
     const sessionReply = vi.fn(async () => 'om_warning');
     initWorkerPool({
       sessionReply,
-      getSessionWorkingDir: () => '/repo',
+      getSessionWorkingDir: () => REPO,
       getActiveCount: () => 1,
       closeSession: vi.fn(),
     });
     const ds = makeDs({
-      adoptedFrom: { sessionId: 'external', cliId: 'claude-code', cwd: '/repo' },
+      adoptedFrom: { sessionId: 'external', cliId: 'claude-code', cwd: REPO },
     } as any);
     forkWorker(ds, 'adopted turn', 'om_adopted');
     const worker = forkMock.mock.results.at(-1)!.value;
@@ -3507,7 +3515,7 @@ describe('ordinary Claude semantic recovery', () => {
     const sessionReply = vi.fn(async () => 'om_x');
     initWorkerPool({
       sessionReply,
-      getSessionWorkingDir: () => '/repo',
+      getSessionWorkingDir: () => REPO,
       getActiveCount: () => 1,
       closeSession: vi.fn(),
     });
@@ -3538,7 +3546,7 @@ describe('ordinary Claude semantic recovery', () => {
     const sessionReply = vi.fn(async () => 'om_x');
     initWorkerPool({
       sessionReply,
-      getSessionWorkingDir: () => '/repo',
+      getSessionWorkingDir: () => REPO,
       getActiveCount: () => 1,
       closeSession: vi.fn(),
     });
@@ -3572,7 +3580,7 @@ describe('ordinary Claude semantic recovery', () => {
     const sessionReply = vi.fn(async () => 'om_x');
     initWorkerPool({
       sessionReply,
-      getSessionWorkingDir: () => '/repo',
+      getSessionWorkingDir: () => REPO,
       getActiveCount: () => 1,
       closeSession: vi.fn(),
     });
@@ -3598,7 +3606,7 @@ describe('ordinary Claude semantic recovery', () => {
     const sessionReply = vi.fn(async () => 'om_warning');
     initWorkerPool({
       sessionReply,
-      getSessionWorkingDir: () => '/repo',
+      getSessionWorkingDir: () => REPO,
       getActiveCount: () => 1,
       closeSession: vi.fn(),
     });
@@ -3898,7 +3906,7 @@ describe('ordinary Claude semantic recovery', () => {
     const sessionReply = vi.fn(async () => 'om_warning');
     initWorkerPool({
       sessionReply,
-      getSessionWorkingDir: () => '/repo',
+      getSessionWorkingDir: () => REPO,
       getActiveCount: () => 1,
       closeSession: vi.fn(),
     });
@@ -4058,7 +4066,7 @@ describe('no-transport workers never receive the Lark app secret', () => {
   });
   const adoptedFrom = {
     source: 'tmux', tmuxTarget: 'work:0.0', originalCliPid: 4242, sessionId: 'sess-adopt-secret',
-    cliId: 'claude-code', cwd: '/repo', paneCols: 200, paneRows: 50,
+    cliId: 'claude-code', cwd: REPO, paneCols: 200, paneRows: 50,
   } as DaemonSession['adoptedFrom'];
 
   it('apiOnly bot: empty secret in fork env and init even when bots.json carries one', () => {
@@ -5479,7 +5487,7 @@ describe('Codex App clean-input feature gate', () => {
     });
     initWorkerPool({
       sessionReply: vi.fn(async () => 'om_reply'),
-      getSessionWorkingDir: () => '/repo',
+      getSessionWorkingDir: () => REPO,
       getActiveCount: () => 1,
       closeSession: vi.fn(),
       enforceLiveSessionCap,
@@ -5519,7 +5527,7 @@ describe('Codex App clean-input feature gate', () => {
       });
       initWorkerPool({
         sessionReply: vi.fn(async () => 'om_reply'),
-        getSessionWorkingDir: () => '/repo',
+        getSessionWorkingDir: () => REPO,
         getActiveCount: () => 1,
         closeSession: vi.fn(),
         onQueuedActivationSubmitted: release,
@@ -5698,7 +5706,7 @@ describe('adopt worker re-fork forwards the incoming turn (PR#293 issue #3)', ()
         originalCliPid: 4242,
         sessionId: 'sess-adopt-live',
         cliId: 'claude-code',
-        cwd: '/repo',
+        cwd: REPO,
         paneCols: 200,
         paneRows: 50,
       },
@@ -5890,7 +5898,7 @@ describe('session.start lifecycle integration', () => {
     const enforceLiveSessionCap = vi.fn();
     initWorkerPool({
       sessionReply: vi.fn(async () => 'om_reply'),
-      getSessionWorkingDir: () => '/repo',
+      getSessionWorkingDir: () => REPO,
       getActiveCount: () => 31,
       closeSession: vi.fn(),
       enforceLiveSessionCap,
@@ -6036,7 +6044,7 @@ describe('session.start lifecycle integration', () => {
         originalCliPid: 23456,
         sessionId: 'codex-session',
         cliId: 'codex',
-        cwd: '/repo',
+        cwd: REPO,
       },
     }));
 
@@ -6058,7 +6066,7 @@ describe('session.start lifecycle integration', () => {
         originalCliPid: 23456,
         sessionId: 'codex-session',
         cliId: 'codex',
-        cwd: '/repo',
+        cwd: REPO,
       },
     }));
 
@@ -6081,7 +6089,7 @@ describe('session.start lifecycle integration', () => {
         originalCliPid: 23456,
         sessionId: 'codex-session',
         cliId: 'codex',
-        cwd: '/repo',
+        cwd: REPO,
       },
     }));
 
@@ -6391,7 +6399,7 @@ describe('blocker #3: forkAdoptWorker refuses sandbox-enabled bots', () => {
       originalCliPid: 23456,
       sessionId: 'codex-session',
       cliId: 'codex',
-      cwd: '/repo',
+      cwd: REPO,
     },
   });
 
@@ -6665,7 +6673,7 @@ describe('managed turn authority worker generations', () => {
   it('clears retained policy authority when exit reconciliation kills the same worker', async () => {
     initWorkerPool({
       sessionReply: vi.fn(async () => 'om_reply'),
-      getSessionWorkingDir: () => '/repo',
+      getSessionWorkingDir: () => REPO,
       getActiveCount: () => 1,
       closeSession: vi.fn(),
       // onCliExit is async in production. A reconciliation step can kill the
@@ -6792,7 +6800,7 @@ describe('managed turn authority worker generations', () => {
         originalCliPid: 23456,
         sessionId: 'codex-session',
         cliId: 'codex',
-        cwd: '/repo',
+        cwd: REPO,
       },
     });
     forkMock.mockImplementationOnce(() => { throw new Error('adopt replacement fork failed'); });
@@ -7092,7 +7100,7 @@ describe('worker startup failure delivery', () => {
     const sessionReply = vi.fn(async () => 'om_error_reply');
     initWorkerPool({
       sessionReply,
-      getSessionWorkingDir: () => '/repo',
+      getSessionWorkingDir: () => REPO,
       getActiveCount: () => 1,
       closeSession: vi.fn(),
     });
@@ -7132,7 +7140,7 @@ describe('worker startup failure delivery', () => {
     const sessionReply = vi.fn(async () => 'om_error_reply');
     initWorkerPool({
       sessionReply,
-      getSessionWorkingDir: () => '/repo',
+      getSessionWorkingDir: () => REPO,
       getActiveCount: () => 1,
       closeSession: vi.fn(),
     });
@@ -7175,7 +7183,7 @@ describe('worker startup failure delivery', () => {
     const sessionReply = vi.fn(async () => 'om_error_reply');
     initWorkerPool({
       sessionReply,
-      getSessionWorkingDir: () => '/repo',
+      getSessionWorkingDir: () => REPO,
       getActiveCount: () => 1,
       closeSession: vi.fn(),
     });
@@ -7205,7 +7213,7 @@ describe('worker startup failure delivery', () => {
     const sessionReply = vi.fn(async () => 'om_error_reply');
     initWorkerPool({
       sessionReply,
-      getSessionWorkingDir: () => '/repo',
+      getSessionWorkingDir: () => REPO,
       getActiveCount: () => 1,
       closeSession: vi.fn(),
     });
@@ -7232,7 +7240,7 @@ describe('worker startup failure delivery', () => {
 
   it('leaves a durable VC delivery pre-ready worker exit to the receipt chain (no reply)', async () => {
     const sessionReply = vi.fn(async () => 'om_error_reply');
-    initWorkerPool({ sessionReply, getSessionWorkingDir: () => '/repo', getActiveCount: () => 1, closeSession: vi.fn() });
+    initWorkerPool({ sessionReply, getSessionWorkingDir: () => REPO, getActiveCount: () => 1, closeSession: vi.fn() });
     const ds = makeDs();
     (ds.session as unknown as { vcMeetingReceiver: unknown }).vcMeetingReceiver = {
       meetingId: 'm1', memberId: 'mem1', memberEpoch: 1,
@@ -7251,7 +7259,7 @@ describe('worker startup failure delivery', () => {
 
   it('leaves a durable VC delivery fork-level error to the receipt chain (no reply)', async () => {
     const sessionReply = vi.fn(async () => 'om_error_reply');
-    initWorkerPool({ sessionReply, getSessionWorkingDir: () => '/repo', getActiveCount: () => 1, closeSession: vi.fn() });
+    initWorkerPool({ sessionReply, getSessionWorkingDir: () => REPO, getActiveCount: () => 1, closeSession: vi.fn() });
     const ds = makeDs();
     (ds.session as unknown as { vcMeetingReceiver: unknown }).vcMeetingReceiver = {
       meetingId: 'm1', memberId: 'mem1', memberEpoch: 1,
@@ -7269,7 +7277,7 @@ describe('worker startup failure delivery', () => {
 
   it('Plan B: a plain user IM-turn fork error on a meeting-agent session DOES surface to the user', async () => {
     const sessionReply = vi.fn(async () => 'om_error_reply');
-    initWorkerPool({ sessionReply, getSessionWorkingDir: () => '/repo', getActiveCount: () => 1, closeSession: vi.fn() });
+    initWorkerPool({ sessionReply, getSessionWorkingDir: () => REPO, getActiveCount: () => 1, closeSession: vi.fn() });
     const ds = makeDs();
     (ds.session as unknown as { vcMeetingReceiver: unknown }).vcMeetingReceiver = {
       meetingId: 'm1', memberId: 'mem1', memberEpoch: 1,
@@ -7290,7 +7298,7 @@ describe('worker startup failure delivery', () => {
 
   it('Plan B: a durable meeting-delivery fork error stays fenced (not surfaced out-of-band)', async () => {
     const sessionReply = vi.fn(async () => 'om_error_reply');
-    initWorkerPool({ sessionReply, getSessionWorkingDir: () => '/repo', getActiveCount: () => 1, closeSession: vi.fn() });
+    initWorkerPool({ sessionReply, getSessionWorkingDir: () => REPO, getActiveCount: () => 1, closeSession: vi.fn() });
     const ds = makeDs();
     (ds.session as unknown as { vcMeetingReceiver: unknown }).vcMeetingReceiver = {
       meetingId: 'm1', memberId: 'mem1', memberEpoch: 1,
@@ -7312,7 +7320,7 @@ describe('worker startup failure delivery', () => {
     const sessionReply = vi.fn(async () => 'om_error_reply');
     initWorkerPool({
       sessionReply,
-      getSessionWorkingDir: () => '/repo',
+      getSessionWorkingDir: () => REPO,
       getActiveCount: () => 1,
       closeSession: vi.fn(),
     });
@@ -7332,7 +7340,7 @@ describe('worker startup failure delivery', () => {
     const sessionReply = vi.fn(async () => 'om_error_reply');
     initWorkerPool({
       sessionReply,
-      getSessionWorkingDir: () => '/repo',
+      getSessionWorkingDir: () => REPO,
       getActiveCount: () => 1,
       closeSession: vi.fn(),
     });
@@ -7356,7 +7364,7 @@ describe('worker startup failure delivery', () => {
     const sessionReply = vi.fn(async () => 'om_error_reply');
     initWorkerPool({
       sessionReply,
-      getSessionWorkingDir: () => '/repo',
+      getSessionWorkingDir: () => REPO,
       getActiveCount: () => 1,
       closeSession: vi.fn(),
     });
@@ -7366,7 +7374,7 @@ describe('worker startup failure delivery', () => {
         originalCliPid: 23456,
         sessionId: 'codex-session',
         cliId: 'codex',
-        cwd: '/repo',
+        cwd: REPO,
       },
     });
     forkAdoptWorker(ds);
@@ -7647,12 +7655,54 @@ describe('forkWorker session.workingDir back-fill (cross-bot inherit enabler)', 
     expect(ds.session.workingDir).toBe('/pinned-repo');
   });
 
-  it('NEVER pins the homedir crash-fallback when the resolved dir is missing', () => {
-    initPool(() => join(tmp, 'gone'));   // does not exist → forkWorker falls back to homedir()
+  it('refuses to start the CLI when the resolved dir is missing instead of falling back to $HOME', () => {
+    const gone = join(tmp, 'gone');
+    const onMissingWorkingDir = vi.fn();
+    initWorkerPool({
+      sessionReply: vi.fn(async () => 'om_reply'),
+      getSessionWorkingDir: () => gone,
+      onMissingWorkingDir,
+      getActiveCount: () => 1,
+      closeSession: vi.fn(),
+    });
     const ds = makeDs();
-    ds.session.workingDir = undefined;
-    forkWorker(ds, 'hi', false);
-    expect(ds.session.workingDir).toBeFalsy();   // cwd(homedir) !== rawCwd(missing) → not persisted
+    ds.session.workingDir = gone;
+    ds.workingDir = gone;
+    forkMock.mockClear();
+
+    expect(() => forkWorker(ds, 'hi', { turnId: 'om_turn_missing' })).toThrow(MissingWorkingDirError);
+
+    expect(forkMock).not.toHaveBeenCalled();
+    expect(onMissingWorkingDir).toHaveBeenCalledWith(ds, gone, { turnId: 'om_turn_missing' });
+    expect(ds.workingDir).toBe(gone);           // not rewritten to $HOME for the next attempt
+    expect(ds.session.workingDir).toBe(gone);
+    expect(ds.worker).toBeFalsy();
+  });
+
+  it('re-attaching a backing session probed alive still forks past a deleted dir (worker in $HOME)', () => {
+    const gone = join(tmp, 'gone');
+    const onMissingWorkingDir = vi.fn();
+    initWorkerPool({
+      sessionReply: vi.fn(async () => 'om_reply'),
+      getSessionWorkingDir: () => gone,
+      onMissingWorkingDir,
+      getActiveCount: () => 1,
+      closeSession: vi.fn(),
+    });
+    const ds = makeDs();
+    ds.session.workingDir = gone;
+    ds.workingDir = gone;
+    forkMock.mockClear();
+
+    forkWorker(ds, '', true, { reattachLiveBackend: true });
+
+    expect(onMissingWorkingDir).not.toHaveBeenCalled();
+    expect(forkMock).toHaveBeenCalledTimes(1);
+    expect((forkMock.mock.calls[0]![2] as { cwd: string }).cwd).toBe(homedir());
+    // The real directory stays on the session, so a later cold start sees it
+    // missing and refuses rather than inheriting the worker's $HOME.
+    expect(ds.workingDir).toBe(gone);
+    expect(ds.session.workingDir).toBe(gone);
   });
 
   it('NEVER pins a legitimately-resolved $HOME (a sibling must not inherit the home dir)', () => {
@@ -7683,7 +7733,7 @@ describe('ordinary-turn recovery admission (scheduled turns, type-ahead)', () =>
     const sessionReply = vi.fn(async () => 'om_card');
     initWorkerPool({
       sessionReply,
-      getSessionWorkingDir: () => '/repo',
+      getSessionWorkingDir: () => REPO,
       getActiveCount: () => 1,
       closeSession: vi.fn(),
     });
@@ -8024,7 +8074,7 @@ describe('Codex capacity recovery', () => {
     vi.mocked(getBot).mockImplementation(() => defaultBot({ codexCapacityRecovery: true, ...botOverrides }));
     vi.useFakeTimers();
     const sessionReply = vi.fn(async () => 'om_card');
-    initWorkerPool({ sessionReply, getSessionWorkingDir: () => '/repo', getActiveCount: () => 1, closeSession: vi.fn() });
+    initWorkerPool({ sessionReply, getSessionWorkingDir: () => REPO, getActiveCount: () => 1, closeSession: vi.fn() });
     const ds = makeDs();
     forkWorker(ds, 'original task', 'om_capacity');
     const worker = forkMock.mock.results.at(-1)!.value;
@@ -8349,7 +8399,7 @@ describe('/btw side answer relay', () => {
     const sessionReply = vi.fn(async () => 'om_reply');
     initWorkerPool({
       sessionReply,
-      getSessionWorkingDir: () => '/repo',
+      getSessionWorkingDir: () => REPO,
       getActiveCount: () => 1,
       closeSession: vi.fn(),
     });

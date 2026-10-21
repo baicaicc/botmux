@@ -566,6 +566,7 @@ import {
   type XpiSharedCwdDispatchUnknownStartupNotice,
   type XpiSharedCwdStartupNotice,
 } from './core/xpi-shared-cwd-admission.js';
+import { MissingWorkingDirError, publishWorkingDirRecovery } from './core/working-dir-recovery.js';
 import {
   XpiSessionStoreBusyRetryScheduler,
   type XpiSessionStoreBusyRetryEvent,
@@ -23239,6 +23240,8 @@ async function notifyOrdinaryIngressFailure(ctx: RoutingContext, err: unknown): 
   const noticeKey = ctx.ingressAdmission?.admitted
     ? 'daemon.ordinary_ingress_admitted_reply_failed'
     : 'daemon.ordinary_ingress_failed';
+  // forkWorker already told the chat (recovery card / "still missing" line).
+  if (err instanceof MissingWorkingDirError) throw err;
   const cliSelectionRejected = err instanceof Error && err.message.startsWith('CLI selection rejected:');
   const xpiQueueFull = err instanceof XpiSharedCwdQueueFullError;
   const notice = cliSelectionRejected
@@ -27473,7 +27476,7 @@ async function handleThreadReplyAdmitted(
         const recoverThroughCodexLedger = isCodexAppCliId(
           ds.session.cliLaunchSnapshot?.cliId ?? ds.session.cliId ?? dsBotCfgForFork.cliId,
         );
-        forkWorker(
+        const queuedReforkAccepted = forkWorker(
           ds,
           recoverThroughCodexLedger ? '' : (ds.session.queuedActivationInput ?? ''),
           {
@@ -27485,6 +27488,17 @@ async function handleThreadReplyAdmitted(
               : {}),
           },
         );
+        // A user-triggered refork ends the post-restart recovery silence. This
+        // queued path returns without rememberLastCliInput (the ordinary place
+        // that clears suppressRecoveryCard), so without this line the flag
+        // survives forever: a later async worker death is muted by
+        // notifyStartupFailure and the user gets zero feedback, message after
+        // message. Clear ONLY the recovery flag — no rememberLastCliInput here.
+        // Gate on the same acceptance result as the main refork path: a sync
+        // throw keeps the flag via the catch below, and a false return
+        // (quarantine / session no longer active rejection leg) keeps it too
+        // and falls through to the ingress "please resend" notice.
+        if (queuedReforkAccepted) ds.suppressRecoveryCard = undefined;
         if (ownsInitialStartClaim()) retainInitialStartClaim = true;
       } catch (err) {
         ds.initialStartPending = false;
@@ -27503,12 +27517,19 @@ async function handleThreadReplyAdmitted(
     if (retainedQueuedActivation) {
       await stageCurrentBehindQueuedActivation();
       try {
-        forkWorker(ds, retainedQueuedActivation, {
+        const retainedReforkAccepted = forkWorker(ds, retainedQueuedActivation, {
           resume: ds.hasHistory,
           turnId: ds.session.queuedActivationTurnId,
           dispatchAttempt: ds.session.queuedActivationDispatchAttempt,
           ...(retainedQueuedActivation.trustedCaller ? { trustedCaller: retainedQueuedActivation.trustedCaller } : {}),
         });
+        // Same recovery-silence contract as the queuedActivationPending branch
+        // above: only an ACCEPTED fork (true, same predicate as the main
+        // refork path) means the user has intervened and clears
+        // suppressRecoveryCard (this path also skips rememberLastCliInput), so
+        // a later async worker failure still notifies instead of being muted.
+        // A false return keeps the silence and routes to the ingress notice.
+        if (retainedReforkAccepted) ds.suppressRecoveryCard = undefined;
         if (ownsInitialStartClaim()) retainInitialStartClaim = true;
       } catch (err) {
         // Keep the staged tail for a later activation attempt, but release the
@@ -29874,6 +29895,11 @@ export async function startDaemon(botIndex?: number): Promise<void> {
     sessionReply,
     onZeroPromptFinal: reportZeroPromptFinal,
     getSessionWorkingDir,
+    onMissingWorkingDir(ds, path, ctx) {
+      void publishWorkingDirRecovery(ds, path, { sessionReply, lastRepoScan }, ctx).catch(err => {
+        logger.warn(`[${tag(ds)}] working-dir recovery notice failed: ${err instanceof Error ? err.message : String(err)}`);
+      });
+    },
     getActiveCount,
     prepareRawInputTurn: (ds, turnId) => prepareTurnCliIdentity(ds, turnId),
     onTriggerTurnStarted: (ds, title, turnId) => beginNewTurn(ds, title, turnId),

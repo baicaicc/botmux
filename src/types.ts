@@ -2185,6 +2185,11 @@ export type WorkerToDaemon =
     }
   | { type: 'prompt_ready' }
   | { type: 'cli_runtime_version'; version: string }
+  /** The CLI said its own install changed under the running process (Pi after
+   *  a global upgrade: on-demand modules then fail with "Cannot find module").
+   *  The daemon retires the worker once the current turn settles, so the next
+   *  turn cold-starts on the new install. */
+  | { type: 'cli_install_changed'; runningVersion: string; installedVersion: string }
   | { type: 'runner_build_ready'; runnerBuildId: string }
   | {
       type: 'restart_result';

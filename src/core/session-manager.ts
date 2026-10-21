@@ -3292,6 +3292,9 @@ export async function restoreActiveSessions(
   // actual re-fork is deferred into `toReattach` and staggered below so a box
   // with dozens of surviving sessions doesn't spike on restart.
   const toReattach: DaemonSession[] = [];
+  // Rows whose backing session probed alive: their CLI is running already, so
+  // re-attaching is allowed even when the working directory is gone.
+  const liveBackendReattach = new Set<DaemonSession>();
   const restoreCandidates: Array<{
     ds: DaemonSession;
     backendType: PersistentBackendType;
@@ -3425,6 +3428,7 @@ export async function restoreActiveSessions(
     const tag = ds.session.sessionId.substring(0, 8);
     logger.info(`[${tag}] ${backendType} session alive, queued for re-attach`);
     toReattach.push(ds);
+    liveBackendReattach.add(ds);
   }
 
   // Staggered re-fork (see staggeredRecoveryFork): empty prompt = re-attach
@@ -3444,17 +3448,16 @@ export async function restoreActiveSessions(
       const recoverExactNonCodex = ds.session.queuedActivationPending
         && ds.session.cliId !== 'codex-app'
         && ds.session.queuedActivationInput;
-      forkWorker(
-        ds,
-        recoverExactNonCodex || '',
-        recoverExactNonCodex
-          ? {
-              resume: ds.session.queuedActivationResume ?? ds.hasHistory,
-              turnId: ds.session.queuedActivationTurnId,
-              dispatchAttempt: ds.session.queuedActivationDispatchAttempt,
-            }
-          : true,
-      );
+      const prompt = recoverExactNonCodex || '';
+      const resume = recoverExactNonCodex
+        ? {
+            resume: ds.session.queuedActivationResume ?? ds.hasHistory,
+            turnId: ds.session.queuedActivationTurnId,
+            dispatchAttempt: ds.session.queuedActivationDispatchAttempt,
+          }
+        : true;
+      if (liveBackendReattach.has(ds)) forkWorker(ds, prompt, resume, { reattachLiveBackend: true });
+      else forkWorker(ds, prompt, resume);
     },
     RECOVERY_FORK_BATCH_SIZE,
     RECOVERY_FORK_DELAY_MS,

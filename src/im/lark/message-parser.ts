@@ -1745,7 +1745,7 @@ const BOTMUX_INTERNAL_CARD_ACTIONS: ReadonlySet<string> = new Set([
   'toggle_stream', 'tui_keys', 'tui_text_input', 'voice_summary',
   // pendingRepo gates
   'repo_manual_submit', 'repo_worktree_submit', 'skip_repo',
-  'worktree_toggle_mode',
+  'worktree_toggle_mode', 'repo_rebuild_worktree',
   // config / grant / relay cards
   'config_toggle', 'config_set', 'config_quota', 'config_quota_open',
   'config_quota_save', 'config_text_open', 'config_text_save',

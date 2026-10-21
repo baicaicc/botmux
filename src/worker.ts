@@ -341,6 +341,7 @@ import {
   resolveRenderDimensions,
 } from './utils/render-dimensions.js';
 import { bridgeSpecFor, createCliAdapterSync, locateOnPath, resolveCommandReal } from './adapters/cli/registry.js';
+import { parsePiInstallUpdatedNotice, readPiInstallVersion } from './adapters/cli/pi.js';
 import { cliAdapterBindsOwnershipPid } from './adapters/cli/ownership-pid.js';
 import { resolveCodexUpgradeCommand } from './services/codex-upgrade-target.js';
 import {
@@ -12521,6 +12522,10 @@ const APP_RUNNER_OSC_CLI_IDS = new Set(['mira', 'mir', 'dsh', 'minimax']);
 const appRunnerControlDecoder = new RunnerControlDecoder();
 let kiroSessionIdCaptureArmed = false;
 let kiroSessionIdCaptureBuffer = '';
+/** ANSI-stripped PTY tail scanned for Pi's "updated while this session was
+ *  running" warning; the report goes out once per CLI generation. */
+let piInstallChangeScanTail = '';
+let piInstallChangeReported = false;
 
 function decodeCodexAppPayload(payload: string): any | undefined {
   try {
@@ -13126,6 +13131,32 @@ function handleAppRunnerOscMarker(body: string): void {
   void handleTrustedCodexAppMarker(kind, payload);
 }
 
+/** Pi warns on screen that a global upgrade replaced the install this process
+ *  runs from; until it restarts, every on-demand module load fails ("Cannot
+ *  find module"). Hand that to the daemon, which suspends the session once the
+ *  turn settles so the next one cold-starts on the new install. The on-disk
+ *  version must differ from the running one the warning names: the same words
+ *  in a reply or tool output about some other process are not this one. */
+function maybeReportPiInstallChange(data: string): void {
+  if (piInstallChangeReported || lastInitConfig?.cliId !== 'pi') return;
+  piInstallChangeScanTail = tailChars(piInstallChangeScanTail + stripAnsiForLog(data), 600);
+  const notice = parsePiInstallUpdatedNotice(piInstallChangeScanTail);
+  if (!notice) return;
+  piInstallChangeScanTail = '';
+  const installedVersion = cliAdapter?.resolvedBin ? readPiInstallVersion(cliAdapter.resolvedBin) : undefined;
+  if (installedVersion === notice.runningVersion) {
+    log(`Pi update warning names ${notice.runningVersion} as running, which is what is installed — not this process; ignoring`);
+    return;
+  }
+  piInstallChangeReported = true;
+  log(`Pi was updated under this process (running ${notice.runningVersion}, installed ${installedVersion ?? notice.installedVersion})`);
+  send({
+    type: 'cli_install_changed',
+    runningVersion: notice.runningVersion,
+    installedVersion: installedVersion ?? notice.installedVersion,
+  });
+}
+
 function maybeCaptureKiroSessionId(data: string): void {
   if (!kiroSessionIdCaptureArmed || lastInitConfig?.cliId !== 'kiro-cli') return;
   kiroSessionIdCaptureBuffer = tailChars(kiroSessionIdCaptureBuffer + data, 4000);
@@ -13655,10 +13686,11 @@ function handlePtyDataChunk(data: string): void {
   lastPtyActivityAtMs = Date.now();
   maybeReportDeferredTopicMaterialization(data);
   maybeCaptureKiroSessionId(data);
+  maybeReportPiInstallChange(data);
   captureWorkflowTranscript(data);
   // Argv first-turn start evidence (Pi): latch the busy marker from the raw
   // PTY stream. The viewport-based defer cannot see a marker that has not
-  // rendered yet, and a fast turn can paint and clear `Working...` between
+  // rendered yet, and a fast turn can paint and clear its busy line between
   // screen samples — the stream sees every byte exactly once.
   if (
     spawnArgvNeedsWorkingSeed
@@ -13764,6 +13796,7 @@ async function onBackendScreenResync(snapshot: string): Promise<void> {
   lastPtyOutputAtMs = now;
   maybeReportDeferredTopicMaterialization(snapshot);
   maybeCaptureKiroSessionId(snapshot);
+  maybeReportPiInstallChange(snapshot);
 
   // Rebase synchronously before xterm's asynchronous write barrier. If newer
   // PTY bytes arrive while the snapshot is rendering they append after this
@@ -14059,12 +14092,24 @@ function flushQueuedInputAfterTurnStartEvidence(): void {
   flushPending();
 }
 
+/** PTY quiet time the argv fail-open requires before it fires. Pi repaints its
+ *  spinner line every 80ms for the whole turn and writes nothing at an idle
+ *  prompt (measured on 1.3.0), so output within this window means the CLI is
+ *  still busy. Same length as IdleDetector's quiescence window. */
+const SPAWN_ARGV_FAIL_OPEN_QUIET_MS = 2_000;
+
 /** Re-drive the held first idle if no start evidence ever appears. Without
  *  this, a swallowed quiescence idle followed by a fully silent PTY (argv
  *  prompt never consumed) would leave no later signal to re-check the gate.
  *  The re-driven idle still passes deferPromptReadyWhileBusy, so a turn whose
- *  evidence was merely missed keeps deferring on a busy viewport. */
-function scheduleSpawnArgvTurnStartFailOpen(): void {
+ *  evidence was merely missed keeps deferring on a busy viewport. The fail-open
+ *  itself also holds while the PTY is still streaming: the busy check above is
+ *  only as good as busyPattern, and a Pi release that renamed its busy line
+ *  once already turned this branch into "idle while running". */
+function scheduleSpawnArgvTurnStartFailOpen(
+  delayMs = spawnArgvTurnStartEvidenceDeadlineMs - Date.now(),
+  heldForOutput = false,
+): void {
   if (spawnArgvTurnStartFailOpenTimer) return;
   const backendAtSchedule = backend;
   const cliGenerationAtSchedule = cliSpawnGeneration;
@@ -14072,9 +14117,17 @@ function scheduleSpawnArgvTurnStartFailOpen(): void {
     spawnArgvTurnStartFailOpenTimer = null;
     if (backend !== backendAtSchedule || cliSpawnGeneration !== cliGenerationAtSchedule) return;
     if (isPromptReady || !spawnArgvNeedsWorkingSeed || spawnArgvTurnStartEvidenceSeen) return;
+    const quietMs = Date.now() - lastPtyOutputAtMs;
+    if (quietMs < SPAWN_ARGV_FAIL_OPEN_QUIET_MS) {
+      if (!heldForOutput) {
+        log('Argv-baked first prompt grace expired while the PTY is still streaming — holding fail-open until it goes quiet');
+      }
+      scheduleSpawnArgvTurnStartFailOpen(SPAWN_ARGV_FAIL_OPEN_QUIET_MS - quietMs, true);
+      return;
+    }
     log('Argv-baked first prompt showed no start evidence within grace — failing open to quiescence idle');
     idleDetector?.fireIdle();
-  }, Math.max(1, spawnArgvTurnStartEvidenceDeadlineMs - Date.now()));
+  }, Math.max(1, delayMs));
   spawnArgvTurnStartFailOpenTimer.unref?.();
 }
 
@@ -18922,6 +18975,10 @@ async function spawnCli(
     : undefined;
   kiroSessionIdCaptureArmed = cfg.cliId === 'kiro-cli' && !effectiveCliSessionId && !willReattachPersistent;
   kiroSessionIdCaptureBuffer = '';
+  // A new spawn may still re-attach the old process (and its warning), so the
+  // scan re-arms rather than assuming the install is fresh.
+  piInstallChangeReported = false;
+  piInstallChangeScanTail = '';
   // Sandboxed sessions: write this bot's OWN send-credential into its BOT_HOME.
   // `botmux send` reads the secret from here instead of bots.json (which
   // deny-by-default never exposes) — the secret never travels via env/argv (no

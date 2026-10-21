@@ -49,6 +49,7 @@ import {
   markMessageListenerRunPreviewRunning,
 } from '../services/message-listener-run-preview-store.js';
 import { persistStreamCardState, rememberLastCliInput } from './session-manager.js';
+import { MissingWorkingDirError } from './working-dir-recovery.js';
 import { spawnWorker, isStandaloneBinary, WORKER_ENTRY_SUBCOMMAND } from './self-spawn.js';
 import { resolveSessionLaunchModel, resolveSessionGroupSettings } from './session-model.js';
 import {
@@ -909,6 +910,10 @@ export interface WorkerPoolCallbacks {
     opts?: WorkerSessionReplyOptions,
   ) => Promise<string>;
   getSessionWorkingDir: (ds?: DaemonSession) => string;
+  /** forkWorker refused a start because the session's working directory is
+   *  gone; tell the chat and offer recovery. Fired just before the
+   *  {@link MissingWorkingDirError} is thrown, so callers need not reply. */
+  onMissingWorkingDir?: (ds: DaemonSession, path: string, ctx: { turnId?: string }) => void;
   getActiveCount: () => number;
   /** Prepare trigger-user CLI identity before a delayed raw-input turn. */
   prepareRawInputTurn?: (ds: DaemonSession, turnId: string) => void | Promise<void>;
@@ -8391,6 +8396,9 @@ export function suspendWorker(ds: DaemonSession, reason = 'suspended_idle'): boo
  * the flag with no later checkpoint to revive it — hence the explicit
  * transfer-settled retry below.
  */
+/** Queued-suspend reason for a CLI whose install changed under it. */
+const CLI_INSTALL_CHANGED_SUSPEND = 'cli_install_changed';
+
 function runPendingSuspendIfSettled(ds: DaemonSession, ownsGeneration?: () => boolean): void {
   const reason = ds.pendingSuspendReason;
   if (!reason) return;
@@ -8426,6 +8434,19 @@ function runPendingSuspendIfSettled(ds: DaemonSession, ownsGeneration?: () => bo
     // here keeps the "fulfilled by the deferred path" signal distinguishable
     // from a suspend that came from anywhere else.
     logger.info(`[${tag(ds)}] Deferred suspend fulfilled (${reason}) after turn completed`);
+    return;
+  }
+  // A pty backend cannot go dormant, yet a CLI running from a replaced install
+  // still has to be left behind: retire the worker like `/cd` does there, so
+  // the next message cold-starts it with resume.
+  if (reason === CLI_INSTALL_CHANGED_SUSPEND
+    && !isSuspendableBackendType(ds.initConfig?.backendType)
+    && !isSessionTransferring(ds)
+    && !hasProtectedSessionMutationOwnership(ds)) {
+    ds.hasHistory = true;
+    clearPendingSuspendClaim(ds, 'pty worker retired for install change');
+    killWorker(ds);
+    logger.info(`[${tag(ds)}] Retired pty worker after its CLI install changed`);
     return;
   }
   // Refused by an in-flight transfer: keeping the flag is not enough on its own.
@@ -12694,6 +12715,12 @@ export type ForkWorkerOptions = {
   onRemoteBackendStartupExit?: () => boolean;
   deferDuringDeviceIsolation?: boolean;
   /**
+   * Restore re-attach to a backing session probed alive: its CLI is already
+   * running and will not be respawned, so a deleted working directory does not
+   * refuse the fork (the worker process itself starts in $HOME instead).
+   */
+  reattachLiveBackend?: boolean;
+  /**
    * Internal: this call is the single re-entry after a marginal-admission
    * reclaim+recheck. A still-blocked decision is rejected immediately instead
    * of scheduling another reclaim (one retry per fork). Never set from callers.
@@ -13383,12 +13410,24 @@ export function forkWorker(
     ? frozenReplyContextForTurn(ds, initReplyTurnId)
     : undefined;
 
-  // A fork() whose cwd no longer exists emits an unhandled 'error' (spawn
-  // ENOENT) that crashes the WHOLE daemon (→ pm2 crash-loop). Fall back to
-  // home so a stale session workingDir can never take the daemon down.
+  // A session whose working directory is gone (a PR worktree removed after
+  // merge, say) must not start its CLI somewhere else: it would run in $HOME
+  // with none of the session's context. Refuse before any mutation below and
+  // let the chat offer recovery (rebuild the worktree / switch directories).
+  // Only re-attaching a backing session that is still alive goes ahead — that
+  // CLI keeps running where it was and is not respawned.
   const rawCwd = cb.getSessionWorkingDir(ds);
-  const cwd = rawCwd && existsSync(rawCwd) ? rawCwd : homedir();
-  if (cwd !== rawCwd) logger.warn(`[${t}] workingDir "${rawCwd}" does not exist — falling back to ${cwd}`);
+  const workingDirMissing = !!rawCwd && !existsSync(rawCwd);
+  if (workingDirMissing && !opts.reattachLiveBackend) {
+    logger.warn(`[${t}] workingDir "${rawCwd}" does not exist — refusing to start the CLI elsewhere`);
+    cb.onMissingWorkingDir?.(ds, rawCwd, { turnId: initAttributionTurnId });
+    throw new MissingWorkingDirError(rawCwd);
+  }
+  // A fork() whose cwd no longer exists emits an unhandled 'error' (spawn
+  // ENOENT) that crashes the WHOLE daemon (→ pm2 crash-loop), so the worker
+  // process of such a re-attach starts in home.
+  const cwd = rawCwd && !workingDirMissing ? rawCwd : homedir();
+  if (cwd !== rawCwd) logger.warn(`[${t}] workingDir "${rawCwd}" does not exist — re-attaching with the worker in ${cwd}`);
 
   // Materialise the resolved launch dir on the live session. getSessionWorkingDir()
   // falls back to the bot-default workingDir, but the usage ledger and dashboard read
@@ -13398,8 +13437,10 @@ export function forkWorker(
   // locate the CLI transcript, and the session's token usage silently never records.
   // Pinning the resolved cwd here (it equals what the worker actually forked into) closes
   // that gap without touching the persisted session.workingDir "unset = follow default"
-  // semantics: this is re-derived on every fork/restore.
-  ds.workingDir = cwd;
+  // semantics: this is re-derived on every fork/restore. A re-attach past a
+  // deleted directory keeps the real one, so the next cold start still sees
+  // it missing instead of inheriting the worker's $HOME.
+  if (!workingDirMissing) ds.workingDir = cwd;
 
   // Also persist the effective launch dir onto the SESSION record so a sibling
   // bot @-ed into the same anchor can inherit it (inherit-peer reads the
@@ -14567,6 +14608,22 @@ function setupWorkerHandlers(
     dispatchAttempt?: number,
   ): Promise<void> => {
     if (startupState.failureNotified) return;
+    // Restart recovery (daemon restart batch-restore): stay silent in the chat.
+    // Without this guard every restored session whose worker fails to start
+    // posts a "会话启动失败" card into its own topic — a broadcast storm during
+    // bulk restore. The failure still lands in the daemon log below; the next
+    // real user turn surfaces it via the ordinary ingress-failure notice, and
+    // the next successful CLI input clears suppressRecoveryCard
+    // (rememberLastCliInput) so later failures notify normally. Do NOT set
+    // failureNotified here: a later generation failing after the flag clears
+    // must still surface.
+    if (ds.suppressRecoveryCard) {
+      logger.warn(
+        `[${t}] Startup failure notification suppressed by suppressRecoveryCard `
+        + `(session recovery mode) sid=${ds.session.sessionId}: ${reason}`,
+      );
+      return;
+    }
     startupState.failureNotified = true;
     emitSessionLifecycleHook(ds, 'session.requires_attention', {
       reason: 'worker_start_failed',
@@ -15496,6 +15553,37 @@ function setupWorkerHandlers(
             patch: { cliVersion: msg.version },
           },
         });
+        break;
+      }
+
+      case 'cli_install_changed': {
+        if (!ownsLifecycleMutation()) break;
+        const cliId = sessionCliId(ds, getBot(ds.larkAppId).config);
+        logger.warn(
+          `[${t}] ${cliId} install changed under the running process `
+          + `(running ${msg.runningVersion}, installed ${msg.installedVersion}) — `
+          + 'suspending once the turn settles so the next one cold-starts on the new install',
+        );
+        // Same queued suspend as `botmux suspend` on a busy session: fulfilled
+        // at the next idle edge, then the next message cold-resumes. A manual
+        // request already queued for this generation wins.
+        if (!ds.pendingSuspendReason) {
+          ds.pendingSuspendReason = CLI_INSTALL_CHANGED_SUSPEND;
+          ds.pendingSuspendGeneration = ds.workerGeneration;
+        }
+        void cb.sessionReply(
+          sessionAnchorId(ds),
+          tr('worker.cli_install_changed', {
+            cli: getCliDisplayName(cliId),
+            running: msg.runningVersion,
+            installed: msg.installedVersion,
+          }, localeForBot(ds.larkAppId)),
+          'text',
+          ds.larkAppId,
+          undefined,
+          { sourceSessionId: ds.session.sessionId },
+        ).catch(err => logger.warn(`[${t}] install-change notice failed: ${err instanceof Error ? err.message : String(err)}`));
+        runPendingSuspendIfSettled(ds, ownsLifecycleMutation);
         break;
       }
 

@@ -48,6 +48,7 @@ import { validateCodexServiceTier } from '../services/codex-service-tier-catalog
 import { botInjectedEnv, buildSessionChildEnv } from './env-policy.js';
 import * as asyncTriggerStore from '../services/async-trigger-store.js';
 import { resolveAsyncTriggerState, decideAsyncOwnership } from '../services/async-trigger-state.js';
+import { isLoopbackPeer } from '../utils/loopback-peers.js';
 import * as scheduleStore from '../services/schedule-store.js';
 import type { ScheduleReasoningEffort } from '../services/schedule-store.js';
 import { queryScheduleRunLogs } from '../services/schedule-run-log-store.js';
@@ -4891,7 +4892,9 @@ ipcRoute('POST', '/api/sessions/:sessionId/resume', async (req, res, params) => 
 ipcRoute('POST', '/api/sessions/migrate-to-chat', async (req, res) => {
   const remote = req.socket.remoteAddress;
   // node may report '127.0.0.1' or '::ffff:127.0.0.1' (IPv4 mapped) or '::1'.
-  const localish = remote === '127.0.0.1' || remote === '::1' || remote === '::ffff:127.0.0.1';
+  // 复用 loopback-peers：定制内核把 loopback peer 上报成 LAN IP 时，
+  // BOTMUX_LOOPBACK_PEERS 放行的地址同样适用于此跨 daemon 迁移端点。
+  const localish = remote ? isLoopbackPeer(remote) : false;
   if (!localish) return jsonRes(res, 403, { ok: false, error: 'not_local' });
 
   let body: {
