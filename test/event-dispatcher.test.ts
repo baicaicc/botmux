@@ -5399,6 +5399,60 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     expect(mockReplyMessage).not.toHaveBeenCalled();
   });
 
+  it('relays a dispatch assignee @-ing us in its dispatch topic instead of forking a thread session', async () => {
+    setupBotState({ chatGrants: { 'chat-dispatch': [OTHER_BOT_OPEN_ID] } });
+    mockReadFileSync.mockReturnValue('{}');
+    const relay = vi.fn(async () => true);
+    (handlers as any).relayDispatchPeerReply = relay;
+    const event = makeBotMessageEvent({
+      senderOpenId: OTHER_BOT_OPEN_ID,
+      chatId: 'chat-dispatch',
+      rootId: 'om_dispatch_seed',
+      threadId: 'omt_dispatch_seed',
+      messageId: 'msg-peer-report',
+      content: JSON.stringify({
+        zh_cn: { content: [[{ tag: 'at', user_id: MY_OPEN_ID }, { tag: 'text', text: ' 子项目完成：库存够 1 天' }]] },
+      }),
+    });
+
+    await capturedHandlers['im.message.receive_v1'](event);
+    await flushEventWork();
+
+    expect(relay).toHaveBeenCalledWith({
+      larkAppId: MY_APP_ID,
+      chatId: 'chat-dispatch',
+      rootId: 'om_dispatch_seed',
+      messageId: 'msg-peer-report',
+      senderOpenId: OTHER_BOT_OPEN_ID,
+      content: expect.stringContaining('子项目完成：库存够 1 天'),
+    });
+    expect(handlers.handleThreadReply).not.toHaveBeenCalled();
+    expect(handlers.handleNewTopic).not.toHaveBeenCalled();
+  });
+
+  it('routes the @-mention as a thread reply when it is not a dispatch peer reply', async () => {
+    setupBotState({ chatGrants: { 'chat-dispatch': [OTHER_BOT_OPEN_ID] } });
+    mockReadFileSync.mockReturnValue('{}');
+    const relay = vi.fn(async () => false);
+    (handlers as any).relayDispatchPeerReply = relay;
+    const event = makeBotMessageEvent({
+      senderOpenId: OTHER_BOT_OPEN_ID,
+      chatId: 'chat-dispatch',
+      rootId: 'om_plain_topic',
+      threadId: 'omt_plain_topic',
+      content: JSON.stringify({ zh_cn: { content: [[{ tag: 'at', user_id: MY_OPEN_ID }]] } }),
+    });
+
+    await capturedHandlers['im.message.receive_v1'](event);
+    await flushEventWork();
+
+    expect(relay).toHaveBeenCalledTimes(1);
+    expect(handlers.handleThreadReply).toHaveBeenCalledWith(event, expect.objectContaining({
+      anchor: 'om_plain_topic',
+      larkAppId: MY_APP_ID,
+    }));
+  });
+
   it('keeps the unknown external bot @blocked path silent when auto grant cards are disabled', async () => {
     setupBotState({ allowedUsers: ['ou_owner'], autoGrantRequestCards: false });
     mockGetOwnerOpenId.mockReturnValue('ou_owner');

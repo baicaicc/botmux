@@ -21,7 +21,9 @@ import {
   appendDispatchReportProtocol,
   appendDispatchReportProtocolWithDelivery,
   appendLegacyDispatchReportProtocol,
+  appendPeerDispatchReportProtocol,
   buildDispatchCompletionBrief,
+  isDispatchPeerReply,
   stripDispatchCompletionProtocol,
   buildProjectDispatchSyncAction,
   parseDispatchBotSpec,
@@ -209,14 +211,76 @@ describe('dispatch completion switch wiring', () => {
     });
 
     expect(result.includes('botmux report --dispatch-root om_seed_exact')).toBe(exactReport);
-    expect(result.includes('botmux report "子项目完成 + 产出位置/摘要"')).toBe(!exactReport);
+    expect(result.includes('botmux report --into om_seed_exact')).toBe(!exactReport);
     expect(result.includes('botmux send --no-mention')).toBe(sameTopicSend);
+  });
+
+  it('authenticates the exact report callback through daemon IPC', () => {
+    const source = readFileSync(new URL('../src/cli.ts', import.meta.url), 'utf8');
+    const start = source.indexOf('async function cmdReport');
+    const end = source.indexOf('\nasync function ', start + 1);
+    const report = source.slice(start, end);
+
+    expect(report).toContain('postCurrentSessionDaemonRoute({');
+    expect(report).toContain('path: REPORT_SESSION_RELAY_ROUTE');
+    expect(report).not.toContain("orchestrate-dispatch.json");
+  });
+
+  it('renders dispatch save feedback inside its own dashboard setting row', () => {
+    const source = readFileSync(new URL('../src/dashboard/web/roles-page.tsx', import.meta.url), 'utf8');
+    const injectStart = source.indexOf("tr('roles.injectModeLabel')");
+    const completionStart = source.indexOf("tr('roles.dispatchCompletionLabel')", injectStart);
+    const textareaStart = source.indexOf('<textarea', completionStart);
+    const injectRow = source.slice(injectStart, completionStart);
+    const completionRow = source.slice(completionStart, textareaStart);
+
+    expect(injectRow).toContain('<Flash flash={injectFlash} />');
+    expect(injectRow).not.toContain('dispatchCompletionFlash');
+    expect(completionRow).toContain('<Flash flash={dispatchCompletionFlash} />');
+  });
+
+  it('asks --bot assignees to report inside the dispatch topic, @-ing the orchestrator', () => {
+    const peer = appendPeerDispatchReportProtocol('跨机器任务', 'om_seed_exact');
+    expect(peer).toContain('botmux report --into om_seed_exact "子项目完成 + 产出位置/摘要"');
+    expect(peer).not.toContain('--legacy-dispatch');
+    expect(() => appendPeerDispatchReportProtocol('错误目标', 'oc_chat')).toThrow('valid om_ root id');
+  });
+
+  it('strips the peer report protocol like the other generated suffixes', () => {
+    const content = buildDispatchCompletionBrief({
+      brief: '跨机器任务', dispatchRootId: 'om_task', exactReportRootEnabled: false, sameTopicSendEnabled: false,
+    });
+    expect(stripDispatchCompletionProtocol(content, 'om_task')).toBe('跨机器任务');
   });
 
   it('trails the marker so older cross-machine receivers keep the positional report text', () => {
     const legacy = appendLegacyDispatchReportProtocol('跨机器任务');
     expect(legacy).toContain('botmux report "子项目完成 + 产出位置/摘要" --legacy-dispatch');
     expect(legacy).not.toContain('--dispatch-root');
+  });
+});
+
+describe('isDispatchPeerReply', () => {
+  const registry = {
+    om_seed: { orchAppId: 'cli_main', orchChatId: 'oc_main', targetChatId: 'oc_main', bots: ['ou_peer'] },
+    om_elsewhere: { orchAppId: 'cli_main', orchChatId: 'oc_main', targetChatId: 'oc_other', bots: ['ou_peer'] },
+    om_legacy_entry: { orchAppId: 'cli_main', orchChatId: 'oc_main', bots: ['ou_peer'] },
+  };
+  const reply = { registry, larkAppId: 'cli_main', chatId: 'oc_main', rootId: 'om_seed', senderOpenId: 'ou_peer' };
+
+  it('matches an assignee @-ing the dispatching bot in its dispatch topic', () => {
+    expect(isDispatchPeerReply(reply)).toBe(true);
+    expect(isDispatchPeerReply({ ...reply, rootId: 'om_legacy_entry' })).toBe(true);
+  });
+
+  it.each([
+    ['another dispatcher', { larkAppId: 'cli_other' }],
+    ['a bot that was not assigned', { senderOpenId: 'ou_stranger' }],
+    ['an unregistered topic', { rootId: 'om_unknown' }],
+    ['a different chat', { chatId: 'oc_other' }],
+    ['a dispatch targeted at another chat', { rootId: 'om_elsewhere' }],
+  ])('rejects %s', (_label, override) => {
+    expect(isDispatchPeerReply({ ...reply, ...override })).toBe(false);
   });
 });
 

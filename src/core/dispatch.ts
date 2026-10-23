@@ -96,6 +96,22 @@ export function appendLegacyDispatchReportProtocol(brief: string): string {
     + '把结果回报给主编排会话；不要在本话题 @ 主bot（那会另起一个没有上下文的新会话）。';
 }
 
+/**
+ * Report protocol for `--bot` dispatches, whose assignee may run on another
+ * machine. Its `botmux report` cannot reach our registry, so it reports inside
+ * the dispatch topic and @-mentions us; our daemon recognises the registered
+ * root and relays the message into the original orchestrator session (see
+ * {@link isDispatchPeerReply}). The topic keeps the visible handoff record.
+ */
+export function appendPeerDispatchReportProtocol(brief: string, dispatchRootId: string): string {
+  const root = dispatchRootId.trim();
+  if (!DISPATCH_ROOT_ID_RE.test(root)) throw new Error('dispatch report protocol requires a valid om_ root id');
+  return brief.trimEnd()
+    + '\n\n— 完成回报 —\n'
+    + `干完后在本话题运行 \`botmux report --into ${root} "子项目完成 + 产出位置/摘要"\` `
+    + '交回结果：它会在本话题 @ 主 bot，并转回原始主编排会话。中途需要主 bot 决定时也用这条命令；其他进度不要 @ 主 bot。';
+}
+
 /** Bind a stable local dispatch to its exact report destination. */
 export function appendDispatchReportProtocol(brief: string, dispatchRootId: string): string {
   return appendDispatchReportProtocolWithDelivery(brief, dispatchRootId, 'relay');
@@ -139,9 +155,11 @@ export function buildDispatchCompletionBrief(input: {
   resultDelivery?: DispatchResultDelivery;
 }): string {
   const resultDelivery = input.resultDelivery ?? 'relay';
+  // fork 自有：未启用精确回报根时走跨机器 peer 协议（botmux report --into <om_ 根>），
+  // 回报经 daemon IPC 转回主编排会话（见 isDispatchPeerReply / REPORT_SESSION_RELAY_ROUTE）。
   const withReport = input.exactReportRootEnabled || resultDelivery !== 'relay'
     ? appendDispatchReportProtocolWithDelivery(input.brief, input.dispatchRootId, resultDelivery)
-    : appendLegacyDispatchReportProtocol(input.brief);
+    : appendPeerDispatchReportProtocol(input.brief, input.dispatchRootId);
   return input.sameTopicSendEnabled && resultDelivery === 'relay'
     ? appendDispatchCompletionProtocol(withReport)
     : withReport;
@@ -171,6 +189,28 @@ export function stripDispatchCompletionProtocol(content: string, dispatchRoot: s
     }
   }
   return content;
+}
+
+/**
+ * True when `senderOpenId` was assigned by a dispatch this bot registered at
+ * `rootId` in `chatId`. Such an @-mention is the assignee reporting back, so it
+ * belongs to the orchestrator session rather than a new thread session.
+ */
+export function isDispatchPeerReply(input: {
+  registry: Record<string, unknown>;
+  larkAppId: string;
+  chatId: string;
+  rootId: string;
+  senderOpenId: string;
+}): boolean {
+  const entry = input.registry[input.rootId];
+  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return false;
+  const record = entry as Record<string, unknown>;
+  const chatId = typeof record.targetChatId === 'string' ? record.targetChatId : record.orchChatId;
+  return record.orchAppId === input.larkAppId
+    && chatId === input.chatId
+    && Array.isArray(record.bots)
+    && record.bots.includes(input.senderOpenId);
 }
 
 /**
