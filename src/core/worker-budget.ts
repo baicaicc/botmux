@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { totalmem } from 'node:os';
 import { posix } from 'node:path';
@@ -70,6 +71,8 @@ interface MemoryPressureReadOptions {
   readFile?: (path: string) => string;
   procRoot?: string;
   cgroupRoot?: string;
+  /** Test seam: resolve an external probe (`sysctl`, `memory_pressure`, …) without spawning the process. */
+  execFile?: (file: string, args: string[]) => string;
 }
 
 interface CgroupMount {
@@ -95,6 +98,72 @@ function parseMemoryFullAvg10(raw: string): number | undefined {
   if (!match) return undefined;
   const value = Number(match[1]);
   return Number.isFinite(value) ? value : undefined;
+}
+
+/**
+ * macOS has no /proc or PSI. The closest equivalent of MemAvailable is the
+ * kernel's own memorystatus level (`kern.memorystatus_level`, 0-100): the same
+ * signal `/usr/bin/memory_pressure -Q` prints as "System-wide memory free
+ * percentage". It is XNU's verdict on what fraction of RAM can still be handed
+ * out without swapping, so availableMemoryBytes = level% × total. The
+ * vm.page_* sysctls are unusable here — modern macOS keeps a minimal free list
+ * (tens of MiB on a healthy machine) and no longer exposes an inactive-page
+ * count. memoryFullAvg10 is deliberately left unavailable on darwin: with no
+ * PSI the byte reserve alone gates admission, and a fabricated 0 would hide
+ * genuine contention from evaluatePsiReason.
+ */
+const DARWIN_MEMORY_LEVEL_KEY = 'kern.memorystatus_level';
+
+function parseDarwinMemoryLevel(raw: string): number | undefined {
+  const value = Number(raw.trim());
+  return Number.isInteger(value) && value >= 0 && value <= 100 ? value : undefined;
+}
+
+function parseDarwinMemoryPressureReport(raw: string): number | undefined {
+  const match = /System-wide memory free percentage:\s*(\d+)%/.exec(raw);
+  if (!match) return undefined;
+  const level = Number(match[1]);
+  return level >= 0 && level <= 100 ? level : undefined;
+}
+
+function readDarwinHostMemoryPressure(
+  totalMemoryBytes: number,
+  options: MemoryPressureReadOptions,
+): HostMemoryPressure {
+  const unavailable = (warnings: string[]): HostMemoryPressure => ({
+    totalMemoryBytes,
+    totalMemorySource: 'host',
+    availableMemorySource: 'unavailable',
+    memoryFullAvg10Source: 'unavailable',
+    warnings,
+  });
+  const finish = (level: number): HostMemoryPressure => ({
+    totalMemoryBytes,
+    availableMemoryBytes: Math.round((totalMemoryBytes * level) / 100),
+    totalMemorySource: 'host',
+    availableMemorySource: 'host',
+    memoryFullAvg10Source: 'unavailable',
+    warnings: [],
+  });
+  const run = (file: string, args: string[]): string =>
+    options.execFile ? options.execFile(file, args) : execFileSync(file, args, { encoding: 'utf8' });
+  const describe = (error: unknown): string => (error instanceof Error ? error.message : String(error));
+  const failures: string[] = [];
+  try {
+    const level = parseDarwinMemoryLevel(run('sysctl', ['-n', DARWIN_MEMORY_LEVEL_KEY]));
+    if (level !== undefined) return finish(level);
+    failures.push(`sysctl ${DARWIN_MEMORY_LEVEL_KEY} output was out of range`);
+  } catch (error) {
+    failures.push(`sysctl memory probe failed: ${describe(error)}`);
+  }
+  try {
+    const level = parseDarwinMemoryPressureReport(run('memory_pressure', ['-Q']));
+    if (level !== undefined) return finish(level);
+    failures.push('memory_pressure -Q output was missing the free percentage');
+  } catch (error) {
+    failures.push(`memory_pressure probe failed: ${describe(error)}`);
+  }
+  return unavailable(failures);
 }
 
 function parseCgroupValue(raw: string): number | 'max' | undefined {
@@ -414,7 +483,11 @@ function finiteCgroupPressure(result: Extract<CgroupMemoryResult, { kind: 'finit
 export function readHostMemoryPressure(options: MemoryPressureReadOptions = {}): HostMemoryPressure {
   const totalMemoryBytes = options.totalMemoryBytes ?? totalmem();
   const readFile = options.readFile ?? (path => readFileSync(path, 'utf8'));
-  if ((options.platform ?? process.platform) !== 'linux') {
+  const platform = options.platform ?? process.platform;
+  if (platform === 'darwin') {
+    return readDarwinHostMemoryPressure(totalMemoryBytes, options);
+  }
+  if (platform !== 'linux') {
     return {
       totalMemoryBytes,
       totalMemorySource: 'host',

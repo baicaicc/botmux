@@ -342,10 +342,78 @@ describe('worker memory admission', () => {
   });
 
   it('keeps non-Linux admission fail-open', () => {
-    const pressure = readHostMemoryPressure({ platform: 'darwin', totalMemoryBytes: 16 * GIB });
+    const pressure = readHostMemoryPressure({ platform: 'win32', totalMemoryBytes: 16 * GIB });
     expect(evaluateWorkerAdmission(pressure).allowed).toBe(true);
     expect(pressure.totalMemorySource).toBe('host');
     expect(pressure.availableMemorySource).toBe('unavailable');
+  });
+});
+
+describe('darwin memory admission', () => {
+  // kern.memorystatus_level is XNU's 0-100 available-memory level; the same
+  // number memory_pressure -Q prints as "System-wide memory free percentage".
+  it('derives available bytes from the memorystatus level and gates admission on the byte reserve', () => {
+    const pressure = readHostMemoryPressure({
+      platform: 'darwin',
+      totalMemoryBytes: 16 * GIB,
+      execFile: (file, args) => {
+        expect(file).toBe('sysctl');
+        expect(args).toEqual(['-n', 'kern.memorystatus_level']);
+        return '39\n';
+      },
+    });
+    expect(pressure.availableMemoryBytes).toBe(Math.round((16 * GIB * 39) / 100));
+    expect(pressure.availableMemorySource).toBe('host');
+    expect(pressure.memoryFullAvg10).toBeUndefined();
+    expect(pressure.warnings).toEqual([]);
+    // 39% of 16 GiB ≈ 6.2 GiB clears the default 4 GiB reserve → allowed.
+    expect(evaluateWorkerAdmission(pressure).allowed).toBe(true);
+    // 12% ≈ 1.9 GiB is below the reserve → blocked, no PSI reason.
+    const scarce = readHostMemoryPressure({
+      platform: 'darwin',
+      totalMemoryBytes: 16 * GIB,
+      execFile: () => '12\n',
+    });
+    const blocked = evaluateWorkerAdmission(scarce);
+    expect(blocked.allowed).toBe(false);
+    expect(blocked.reasons).toHaveLength(1);
+    expect(blocked.reasons[0]).toContain('available memory');
+  });
+
+  it('falls back to the memory_pressure report when the sysctl level is out of range', () => {
+    const pressure = readHostMemoryPressure({
+      platform: 'darwin',
+      totalMemoryBytes: 16 * GIB,
+      execFile: (file, args) => {
+        if (file === 'sysctl') {
+          expect(args).toEqual(['-n', 'kern.memorystatus_level']);
+          return '  abc  ';
+        }
+        expect(file).toBe('memory_pressure');
+        expect(args).toEqual(['-Q']);
+        return 'The system has 17179869184 (1048576 pages with a page size of 16384).\nSystem-wide memory free percentage: 45%\n';
+      },
+    });
+    expect(pressure.availableMemoryBytes).toBe(Math.round((16 * GIB * 45) / 100));
+    expect(pressure.availableMemorySource).toBe('host');
+    expect(pressure.warnings).toEqual([]);
+    expect(evaluateWorkerAdmission(pressure).allowed).toBe(true);
+  });
+
+  it('fails open when both probes fail', () => {
+    const pressure = readHostMemoryPressure({
+      platform: 'darwin',
+      totalMemoryBytes: 16 * GIB,
+      execFile: file => {
+        if (file === 'sysctl') throw new Error('spawn sysctl ENOENT');
+        throw new Error('spawn memory_pressure ENOENT');
+      },
+    });
+    expect(pressure.availableMemorySource).toBe('unavailable');
+    expect(pressure.warnings).toHaveLength(2);
+    expect(pressure.warnings[0]).toContain('sysctl memory probe failed');
+    expect(pressure.warnings[1]).toContain('memory_pressure probe failed');
+    expect(evaluateWorkerAdmission(pressure).allowed).toBe(true);
   });
 });
 
