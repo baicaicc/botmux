@@ -342,10 +342,61 @@ describe('worker memory admission', () => {
   });
 
   it('keeps non-Linux admission fail-open', () => {
-    const pressure = readHostMemoryPressure({ platform: 'darwin', totalMemoryBytes: 16 * GIB });
+    const pressure = readHostMemoryPressure({ platform: 'win32', totalMemoryBytes: 16 * GIB });
     expect(evaluateWorkerAdmission(pressure).allowed).toBe(true);
     expect(pressure.totalMemorySource).toBe('host');
     expect(pressure.availableMemorySource).toBe('unavailable');
+  });
+});
+
+describe('darwin memory admission', () => {
+  // Fixture lines follow `sysctl -n` output order: pagesize, free, inactive,
+  // speculative. (65536 + 32768 + 16384) pages × 16384 B = 1.875 GiB.
+  const sysctlFixture = ['16384', '65536', '32768', '16384'].join('\n');
+
+  it('reads available memory from the vm page pools and gates admission on the byte reserve', () => {
+    const pressure = readHostMemoryPressure({
+      platform: 'darwin',
+      totalMemoryBytes: 16 * GIB,
+      execFileSysctl: keys => {
+        expect(keys).toEqual(['vm.pagesize', 'vm.page_free_count', 'vm.page_inactive_count', 'vm.page_speculative_count']);
+        return sysctlFixture;
+      },
+    });
+    expect(pressure.availableMemoryBytes).toBe((65536 + 32768 + 16384) * 16384);
+    expect(pressure.availableMemorySource).toBe('host');
+    expect(pressure.memoryFullAvg10).toBeUndefined();
+    expect(pressure.warnings).toEqual([]);
+    // 1.875 GiB is below the default 4 GiB reserve → blocked, no PSI reason.
+    const blocked = evaluateWorkerAdmission(pressure);
+    expect(blocked.allowed).toBe(false);
+    expect(blocked.reasons).toHaveLength(1);
+    expect(blocked.reasons[0]).toContain('available memory');
+    const healthy = evaluateWorkerAdmission({ ...pressure, availableMemoryBytes: 6 * GIB });
+    expect(healthy.allowed).toBe(true);
+    expect(healthy.reasons).toEqual([]);
+  });
+
+  it('fails open when the sysctl probe throws', () => {
+    const pressure = readHostMemoryPressure({
+      platform: 'darwin',
+      totalMemoryBytes: 16 * GIB,
+      execFileSysctl: () => { throw new Error('spawn sysctl ENOENT'); },
+    });
+    expect(pressure.availableMemorySource).toBe('unavailable');
+    expect(pressure.warnings[0]).toContain('sysctl memory probe failed');
+    expect(evaluateWorkerAdmission(pressure).allowed).toBe(true);
+  });
+
+  it('fails open on incomplete sysctl output', () => {
+    const pressure = readHostMemoryPressure({
+      platform: 'darwin',
+      totalMemoryBytes: 16 * GIB,
+      execFileSysctl: () => '16384\n65536\n',
+    });
+    expect(pressure.availableMemorySource).toBe('unavailable');
+    expect(pressure.warnings[0]).toContain('output was incomplete');
+    expect(evaluateWorkerAdmission(pressure).allowed).toBe(true);
   });
 });
 
