@@ -2867,6 +2867,19 @@ export interface EventHandlers {
   /** Check if this bot owns an active session anchored at the given id
    *  (rootMessageId for thread-scope, chatId for chat-scope). */
   isSessionOwner?: (anchor: string, larkAppId: string) => boolean;
+  /** A bot assigned by this bot's own `botmux dispatch` @-mentioned it inside
+   *  that dispatch topic — typically a cross-machine assignee, whose
+   *  `botmux report` cannot reach our registry. Relay it into the original
+   *  orchestrator session instead of forking a context-less thread session.
+   *  Resolves true when relayed; false falls through to normal routing. */
+  relayDispatchPeerReply?: (input: {
+    larkAppId: string;
+    chatId: string;
+    rootId: string;
+    messageId: string;
+    senderOpenId: string;
+    content: string;
+  }) => Promise<boolean>;
   /** Resolve a persisted topic reply alias back to its owning chat-scope session. */
   resolveReplyThreadAlias?: (rootId: string, chatId: string, larkAppId: string) => { chatId: string; sessionId: string; anchor?: string } | null;
   /** True when this chat's chat-scope session already answered `rootId` as a FLAT
@@ -4304,6 +4317,17 @@ export function startLarkEventDispatcher(larkAppId: string, larkAppSecret: strin
         }
         if (chatType === 'p2p' && forcedTopic) {
           recordP2pForceTopicRoot(larkAppId, messageId, chatId);
+        }
+        const dispatchRootId: string | undefined = message?.root_id;
+        if (dispatchRootId && senderOpenId && handlers.relayDispatchPeerReply) {
+          const relayed = await handlers.relayDispatchPeerReply({
+            larkAppId, chatId, rootId: dispatchRootId, messageId, senderOpenId,
+            content: extractMessageTextForRouting(message) ?? '',
+          }).catch(err => {
+            logger.warn(`Dispatch peer reply relay failed, routing as a thread reply: ${err}`);
+            return false;
+          });
+          if (relayed) return;
         }
         logger.info(`Bot-to-bot @mention detected (scope=${ctx.scope}): routing to handleThreadReply`);
         // Serialize per anchor — a sub-bot dispatched a /repo prime + kickoff
