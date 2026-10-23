@@ -1,5 +1,5 @@
 import { buildZeroPromptInput, zeroPromptInjectionForBot, sessionPromptInjection, type PromptInjection } from './core/prompt-injection.js';
-import { stripDispatchCompletionProtocol } from './core/dispatch.js';
+import { isDispatchPeerReply, stripDispatchCompletionProtocol } from './core/dispatch.js';
 import { execFileSync, type ChildProcess } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync, existsSync, mkdirSync, unlinkSync, watch, readdirSync, realpathSync } from 'node:fs';
@@ -3909,6 +3909,39 @@ async function reportZeroPromptFinal(ds: DaemonSession, input: {
       throw new Error(`zero-prompt report: ${delivered.body.error ?? delivered.status}`);
     }
   });
+}
+
+/** The cross-machine counterpart of `botmux report`: an assignee of our own
+ * dispatch @-mentioned us inside the dispatch topic. Hand it to the
+ * orchestrator session bound to that root, through the same signed relay. */
+async function relayDispatchPeerReply(input: {
+  larkAppId: string; chatId: string; rootId: string; messageId: string; senderOpenId: string; content: string;
+}): Promise<boolean> {
+  let registry: Record<string, unknown>;
+  try { registry = JSON.parse(readFileSync(join(config.session.dataDir, 'orchestrate-dispatch.json'), 'utf8')); }
+  catch { return false; }
+  if (!isDispatchPeerReply({ registry, ...input })) return false;
+  const decision = prepareAutomaticDispatchReport({
+    registry, bindingSecret: loadOrCreateDashboardSecret(dispatchReportBindingSecretPath(config.session.dataDir)),
+    dispatchRoot: input.rootId, sourceSessionId: `peer:${input.messageId}`,
+    sourceLarkAppId: input.senderOpenId, content: input.content,
+  });
+  if (!decision || decision.target.larkAppId !== input.larkAppId) return false;
+  const target = findOnlineDaemon(decision.target.larkAppId);
+  if (!target) return false;
+  const requestId = `peer-report:${input.messageId}`;
+  const delivered = await deliverReportSessionRelay({
+    decision,
+    triggerMeta: { requestId, receivedAt: new Date().toISOString(), turnIdempotencyKey: requestId },
+    fetchTarget: (path, init) => fetchDaemonIpc(target.ipcPort, path, init),
+    postProjectUpdate: async () => ({ projectSynced: false }),
+  });
+  if (delivered.status >= 400 || delivered.body.ok === false) {
+    logger.warn(`[dispatch] peer reply ${input.messageId.substring(0, 12)} not relayed: ${delivered.body.error ?? delivered.status}`);
+    return false;
+  }
+  logger.info(`[dispatch] peer reply root=${input.rootId.substring(0, 12)} sender=${input.senderOpenId.substring(0, 12)} relayed to orchestrator session ${decision.target.sessionId.substring(0, 8)}`);
+  return true;
 }
 
 /** Only an authenticated dispatch can shed the protocol appended by our CLI. */
@@ -28057,6 +28090,7 @@ export async function startDaemon(botIndex?: number): Promise<void> {
         : undefined,
       beforeSessionTurn: (data, ctx) => maybeCatchUpVcMeetingConsumerBeforeTurn(data, ctx),
       isSessionOwner: (anchor, appId) => activeSessions.has(sessionKey(anchor, appId)),
+      relayDispatchPeerReply: (input) => relayDispatchPeerReply(input),
       resolveReplyThreadAlias: (rootId, chatId, appId) => findChatReplyAlias(rootId, chatId, appId),
       chatSessionAnsweredRootAtTopLevel: (rootId, chatId, appId) => {
         for (const ds of activeSessions.values()) {
