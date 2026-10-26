@@ -1234,7 +1234,6 @@ export class HerdrBackend implements SessionBackend {
                 '--direction', splitDir,
                 '--cwd', opts.cwd,
                 '--no-focus',
-                ...envCommandArgs(workspaceEnv),
               ]),
               { timeout: 10_000, env: this.childEnv },
             );
@@ -1252,7 +1251,6 @@ export class HerdrBackend implements SessionBackend {
               '--label', tabLabel,
               '--cwd', opts.cwd,
               '--no-focus',
-              ...envCommandArgs(workspaceEnv),
             ]),
             { timeout: 10_000, env: this.childEnv },
           );
@@ -1270,7 +1268,6 @@ export class HerdrBackend implements SessionBackend {
             '--label', tabLabel,
             '--cwd', opts.cwd,
             '--no-focus',
-            ...envCommandArgs(workspaceEnv),
           ]),
           { timeout: 10_000, env: this.childEnv },
         );
@@ -1284,7 +1281,6 @@ export class HerdrBackend implements SessionBackend {
             '--cwd', opts.cwd,
             '--label', this.agentName,
             '--no-focus',
-            ...envCommandArgs(workspaceEnv),
           ]),
           { timeout: 10_000, env: this.childEnv },
         );

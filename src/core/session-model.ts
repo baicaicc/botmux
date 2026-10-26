@@ -13,6 +13,8 @@ export type LaunchModelSession = {
     cliId?: CliId;
     model?: string;
     cliSessionId?: string;
+    /** fork 自有：最近一次共享 KLL 选择的 profile id（kll_model_selected 上报）。 */
+    kllProfileId?: string;
     traexAutoModelRuntime?: TraexAutoModelRuntimeState;
     groupDefaultModels?: GroupDefaultModels;
     scope?: 'thread' | 'chat';
@@ -35,6 +37,8 @@ export type LaunchModelBotConfig = {
   cliId?: CliId;
   model?: string;
   traexAutoModel?: TraexAutoModelConfig;
+  /** fork 自有：共享 KLL 选择器配置（见 services/kll-launch.ts）。 */
+  kll?: import('../services/kll-launch.js').KllConfig;
 };
 
 export type SessionLaunchModelChoice = {

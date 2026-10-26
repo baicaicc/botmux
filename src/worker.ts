@@ -19115,9 +19115,6 @@ function startScreenUpdates(): void {
   // CodeBuddy 确认框通知的去重游标（fork 自有）。
   let lastCodebuddyActionPrompt = '';
   let lastCodebuddyActionTurnId: string | undefined;
-  // Last Claude permission dialog already notified (dedup by projection text;
-  // cleared when the dialog leaves the screen so the next one notifies again).
-  let lastClaudeActionPrompt = '';
   // PTY-activity watermark of the last tick that actually captured. The screen
   // normally reaches us only through onPtyData (it updates lastPtyActivityAtMs
   // and feeds the renderer in the same place), so when this hasn't advanced the
@@ -27576,7 +27573,7 @@ if(typeof ResizeObserver!=='undefined'){
   var ended=false,firstFrameTimer;
   function retry(reason){
     el.textContent=reason;
-    try{ws.close()}catch(e){}
+    try{disconnected({code:0},reason)}catch(e){try{ws.close()}catch(e2){}}
   }
   var openTimer=setTimeout(function(){retry('连接超时，正在重连…')},10000);
   // 新连接 = 新的一次鉴权。上一条连接拿到的权限说明不了这一条，先退回未知（并把这
@@ -27669,11 +27666,11 @@ if(typeof ResizeObserver!=='undefined'){
     if(m){try{_clipBuf=new TextDecoder().decode(Uint8Array.from(atob(m[1]),function(c){return c.charCodeAt(0)}));_doCopy(_clipBuf);_showCopied()}catch(ex){}}
     term.write(data,_settleInitialBottom);
   };
-  ws.onclose=function(e){
+  function disconnected(e,reason){
     if(ended)return; ended=true;
     clearTimeout(openTimer);clearTimeout(firstFrameTimer);
     ws.onopen=ws.onmessage=ws.onclose=ws.onerror=null;
-    ws_=null;el.textContent='disconnected';el.className='err';_wbHideBytes();
+    ws_=null;el.textContent=reason||'disconnected';el.className='err';_wbHideBytes();
     // 关闭当下就把这条连接的写权限退回未知：先复位首帧标志（重连后要等新首帧才恢复
     // 结论），再 _wbSetWsWrite(null) —— 它同时收起输入（term.onData/toolbar/_fwdScroll
     // 的门禁都以 wsHasWrite===true 为准）并向嵌入方上抛 write:null。不这样做的话，断线

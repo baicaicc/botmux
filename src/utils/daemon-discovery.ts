@@ -14,7 +14,6 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { resolveBotmuxDataDir } from '../core/data-dir.js';
-import { DAEMON_HEARTBEAT_STALE_MS } from './daemon-heartbeat.js';
 
 export interface OnlineDaemonInfo {
   larkAppId: string;
@@ -78,7 +77,6 @@ export function listOnlineDaemons(dataDir?: string, opts: { strict?: boolean } =
   const dir = registryDir(dataDir);
   // No existsSync pre-check: it also answers false on EACCES, which strict
   // mode must surface. A registry that was never created (ENOENT) is empty.
-  const now = Date.now();
   const out: OnlineDaemonInfo[] = [];
   let names: string[] = [];
   try { names = readdirSync(dir); } catch (err) {
@@ -120,12 +118,6 @@ export function listOnlineDaemons(dataDir?: string, opts: { strict?: boolean } =
     } catch { /* malformed — skip */ }
   }
   return out;
-}
-
-/** List every daemon whose descriptor file is fresh (heartbeat within STALE_MS). */
-export function listOnlineDaemons(dataDir?: string): OnlineDaemonInfo[] {
-  const now = Date.now();
-  return listDaemonDescriptors(dataDir).filter(d => now - (d.lastHeartbeat ?? 0) <= DAEMON_HEARTBEAT_STALE_MS);
 }
 
 /** Find a specific online daemon by larkAppId. Returns null if offline / not found. */

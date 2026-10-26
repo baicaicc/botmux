@@ -1,5 +1,4 @@
-import { fileURLToPath } from 'node:url';
-import { chmodSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { CLI_MODEL_CHOICES } from './model-choices.js';

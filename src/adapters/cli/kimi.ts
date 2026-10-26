@@ -4,8 +4,9 @@ import { BOTMUX_SHELL_HINTS } from './shared-hints.js';
 import type { CliAdapter, PtyHandle } from './types.js';
 
 import { delay } from '../../utils/timing.js';
-import { wrapBracketedPaste } from './tui-input.js';
 
+const BRACKETED_PASTE_START = '\x1b[200~';
+const BRACKETED_PASTE_END = '\x1b[201~';
 const KIMI_FIRST_WRITE_SETTLE_MS = 250;
 const KIMI_TRUST_MODAL_SETTLE_MS = 800;
 const kimiFirstWriteSeen = new WeakSet<PtyHandle>();

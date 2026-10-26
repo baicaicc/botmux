@@ -2331,6 +2331,7 @@ export interface BotConfig {
    * the historical allowedUsers-only behaviour.
    */
   autoStartOnGroupJoinGateRequired?: boolean;
+  /**
    * Lark 任务入口。When true, the bot registers itself as a Lark task agent: a
    * task assigned to it starts a virtual session, the final output is posted
    * back as a task comment, and comments on the task continue that session.

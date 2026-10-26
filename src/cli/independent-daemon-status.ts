@@ -4,7 +4,7 @@ import { builtinFleetEntryMatches, inspectFleetProcess, type FleetProcessInspect
 import { resolveBotmuxDataDir } from '../core/data-dir.js';
 import { DAEMON_HEARTBEAT_STALE_MS } from '../utils/daemon-heartbeat.js';
 import { readProcessStartIdentity } from '../utils/process-identity.js';
-import { listDaemonDescriptors, parseDaemonIpcPort, type OnlineDaemonInfo } from '../utils/daemon-discovery.js';
+import { listOnlineDaemons, parseDaemonIpcPort, type OnlineDaemonInfo } from '../utils/daemon-discovery.js';
 
 export interface IndependentDaemonStatus {
   appId: string;
@@ -70,7 +70,7 @@ export function inspectIndependentDaemonProcess(
 export function readIndependentDaemonStatus(
   dataDir = resolveBotmuxDataDir(),
   runtime: IndependentDaemonStatusRuntime = {
-    discover: listDaemonDescriptors,
+    discover: listOnlineDaemons,
     inspect: inspectIndependentDaemonProcess,
     launchdJobs: readLaunchdJobs,
     now: Date.now,

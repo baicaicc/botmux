@@ -758,6 +758,23 @@ describe('writeInput: edge cases', () => {
   // re-render (lost Enter → message parked at "enter steer"). Cursor submits a
   // queued follow-up by itself at the turn boundary, so one Enter is enough.
   it('cursor: submits with a single Enter in tmux (no follow-up steer)', async () => {
+    vi.useFakeTimers();
+    try {
+      const adapter = createCursorAdapter('/bin/cursor-agent');
+      const pty = makeTmuxPty();
+      const write = adapter.writeInput(pty, 'queue this turn');
+      await flushFakeTimers();
+      await write;
+
+      expect(pty.sendText).toHaveBeenCalledWith('queue this turn');
+      expect(pty.sendSpecialKeys.mock.calls).toEqual([
+        ['Enter'],
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('kimi: empty string still ends its atomic frame with a submitting CR (tmux)', async () => {
     vi.useFakeTimers();
     try {

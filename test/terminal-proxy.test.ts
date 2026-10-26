@@ -551,6 +551,10 @@ describe('terminal proxy — authenticate before waking (#2004)', () => {
     const res = await fetch(`http://127.0.0.1:${proxy.port}/s/live/`);
     expect(res.status).toBe(200);
     expect(asked).toBe(0);
+  });
+});
+
+// ─── fork 自有：跨机器终端代理握手接力 ─────────────────────────
 describe('terminal proxy — hand-over to a peer daemon proxy', () => {
   it('hands a sibling-owned session to the peer proxy once, with the request intact', async () => {
     const workerPort = await startFakeWorker();

@@ -497,7 +497,7 @@ import {
   type ReportSessionRelayAuthorizationInput,
   type UndeliveredReportRelayReason,
 } from './core/report-session-relay.js';
-import {
+import {  dispatchReportBindingSecretPath,
   createDispatchReportBinding,
   resolveVerifiedDispatchReportTarget,
   loadOrCreateDispatchReportBindingSecret,
@@ -24521,8 +24521,6 @@ async function handleNewTopicAdmitted(data: any, ctx: RoutingContext): Promise<v
     return;
   }
 
-
-  }
   // 斜杠命令执行段已搬到 executeNewTopicSlash（输入全部显式）；true = 已处理。
   if (await executeNewTopicSlash({
     ctx, data, larkAppId, chatId, chatType, scope, anchor, messageId, replyRootId, replyAnchorId, parsed, resources, cmdContent,
@@ -26929,11 +26927,6 @@ async function handleThreadReplyAdmitted(
   } else if (isLegacyTemplateCommand(cmdContent)) {
     await sessionReply(anchor, LEGACY_TEMPLATE_RETIRED_MESSAGE, 'text', larkAppId);
     return;
-  }
-
-
-    larkAppId, cmdContent, activeSessions.get(sessionKey(anchor, larkAppId)),
-  )) {
   }
   // 斜杠命令执行段已搬到 executeThreadSlash（输入全部显式）；true = 已处理。
   if (await executeThreadSlash({
@@ -32254,6 +32247,17 @@ export async function startDaemon(botIndex?: number): Promise<void> {
   startHookAskReclaim();
 
   for (const startDispatcher of startEventDispatchers) startDispatcher();
+  // Lark 任务入口：sessions are restored and the dispatcher is live, so a task
+  // agent can register and settle turns a restart left pending.
+  for (const bot of getAllBots()) {
+    const appId = bot.config.larkAppId;
+    if (!bot.config.taskAgent || bot.config.apiOnly) continue;
+    startLarkTaskAgent(appId, {
+      trigger: (req) => triggerSessionTurn(req, { larkAppId: appId, activeSessions }),
+      lookup: (sessionId, triggerId) => buildAsyncTriggerLookupResponse(sessionId, triggerId),
+      canOperate: (openId) => canOperate(appId, undefined, openId),
+    });
+  }
   if (durableCoordinationRuntime?.mode === 'primary') {
     const deliverDurablePrimaryMessage = async (
       request: DurableSessionSendRequest,
@@ -32379,16 +32383,6 @@ export async function startDaemon(botIndex?: number): Promise<void> {
     });
   } else {
     useOrdinaryOutputDelivery();
-  // Lark 任务入口：sessions are restored and the dispatcher is live, so a task
-  // agent can register and settle turns a restart left pending.
-  for (const bot of getAllBots()) {
-    const appId = bot.config.larkAppId;
-    if (!bot.config.taskAgent || bot.config.apiOnly) continue;
-    startLarkTaskAgent(appId, {
-      trigger: (req) => triggerSessionTurn(req, { larkAppId: appId, activeSessions }),
-      lookup: (sessionId, triggerId) => buildAsyncTriggerLookupResponse(sessionId, triggerId),
-      canOperate: (openId) => canOperate(appId, undefined, openId),
-    });
   }
   xpiSessionStoreBusyNoticeReadyApps.add(cfg.larkAppId);
   // The restore preflight only records structured diagnostics. Human-readable

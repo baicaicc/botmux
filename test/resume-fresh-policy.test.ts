@@ -16,6 +16,8 @@
  *
  * Run: pnpm vitest run test/resume-fresh-policy.test.ts
  */
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, it, expect, vi } from 'vitest';
 import { resumeStartsFresh } from '../src/services/resume-fresh-policy.js';
 import { buildClosedSessionCard } from '../src/core/closed-session-card.js';
@@ -57,6 +59,8 @@ describe('resumeStartsFresh', () => {
 });
 
 // ─── Closed-session card ────────────────────────────────────────────────────
+const workerSource = readFileSync(join(process.cwd(), 'src/worker.ts'), 'utf8');
+
 describe('closed-session card for a precise-id-only CLI', () => {
   const session = (cliSessionId?: string) => ({
     sessionId: 'botmux-session', rootMessageId: 'om_root', chatId: 'oc_chat', chatType: 'group',
@@ -77,6 +81,8 @@ describe('closed-session card for a precise-id-only CLI', () => {
     const md = markdown(buildClosedSessionCard(session('chat-1'), 'zh'));
     expect(md).toContain('cursor-agent --resume chat-1');
     expect(md).not.toContain(freshNote);
+  });
+
   it('feeds the tier into fallBackToFresh (not a standalone side branch)', () => {
     const start = workerSource.indexOf('const fallBackToFresh =');
     expect(start).toBeGreaterThan(-1);
@@ -94,7 +100,7 @@ describe('closed-session card for a precise-id-only CLI', () => {
     expect(block).toContain('effectiveCliSessionId = undefined;');
     expect(block).toContain('resumeFallbackNotified');
     expect(block).toContain('user_notify');
-    expect(block).toContain('新起一个干净会话');
+    expect(block).toContain('正在尝试以新会话重新启动');
   });
 
   it('gives the missing-id case its own reason in the notice', () => {
@@ -131,18 +137,18 @@ describe('closed-session card for a precise-id-only CLI', () => {
 // ─── Card copy wiring (source lock) ─────────────────────────────────────────
 describe('resume copy distinction (source lock)', () => {
   it('card-handler picks the fresh receipt variant via resumeStartsFresh', () => {
-    const source = readFileSync(resolvePath('src/im/lark/card-handler.ts'), 'utf8');
+    const source = readFileSync(join(process.cwd(),'src/im/lark/card-handler.ts'), 'utf8');
     expect(source).toContain("t('card.action.resume_success_fresh'");
     expect(source).toContain('resumeStartsFresh(result.ds.session)');
   });
 
   it('closed-session-card passes the fresh flag into the card builder', () => {
-    const source = readFileSync(resolvePath('src/core/closed-session-card.ts'), 'utf8');
-    expect(source).toContain('resumeStartsFresh({ cliId: closedCliId, cliSessionId: ds.session.cliSessionId })');
+    const source = readFileSync(join(process.cwd(),'src/core/closed-session-card.ts'), 'utf8');
+    expect(source).toContain('resumeStartsFresh({ cliId: closedCliId, cliSessionId: session.cliSessionId })');
   });
 
   it('card-builder renders the fresh note instead of the generic resume note', () => {
-    const source = readFileSync(resolvePath('src/im/lark/card-builder.ts'), 'utf8');
+    const source = readFileSync(join(process.cwd(),'src/im/lark/card-builder.ts'), 'utf8');
     expect(source).toContain('resumeStartsFresh?: boolean');
     expect(source).toContain("t('card.body.resume_starts_fresh'");
   });

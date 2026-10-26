@@ -10,7 +10,7 @@
  * Run: pnpm vitest run test/dispatch.test.ts
  */
 import { describe, it, expect } from 'vitest';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { findAncestorSessionContext } from '../src/core/session-marker.js';

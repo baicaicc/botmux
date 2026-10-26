@@ -113,6 +113,9 @@ describe('voice configuration', () => {
       speaker: 'voice-id',
       minimax: { apiKey: 'key', model: 'speech-2.8-hd', region: 'cn' },
     });
+  });
+});
+
 describe('KLL bot configuration', () => {
   it('loads an explicit local selector and leaves direct bots unchanged', async () => {
     const mod = await freshImport();

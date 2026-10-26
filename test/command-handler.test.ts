@@ -10483,62 +10483,83 @@ describe('command guards — no-session / transfer-in-progress replies', () => {
       vi.mocked(isSessionTransferring).mockReturnValue(false);
     }
     expect(sessionTexts(deps)).toEqual([t('cmd.session.transfer_in_progress')]);
+  });
+});
 
-describe('shared bot native creation', () => {
-  const target = {source:'herdr' as const, cliId:'claude-code' as const, cliPid:4242, panePid:4200,
-    paneCols:100,paneRows:40,cwd:'/native/new',herdrPaneId:'wNew:p1',herdrTerminalId:'term-new',herdrSessionName:'default',sessionId:'native-new'};
-  const created = {id:'case-new',workspacePath:'/native/new',runtimes:{'claude-code':{
-    paneId:'wNew:p1',terminalId:'term-new',herdrSession:'default',sessionId:'native-new'}}};
-  beforeEach(() => {
-    vi.clearAllMocks();
-    vi.mocked(getBot).mockImplementation(defaultGetBot as any);
-    vi.mocked(canOperate).mockReturnValue(true);
-    vi.mocked(validateAdoptTarget).mockReturnValue(true);
-    vi.mocked(discoverAdoptableSessions).mockReturnValue([target]);
+import { parseTopicHeader, isTopicHeader } from '../src/core/topic-header.js';
+
+// ─── fork 自有：parseTopicHeader 路由元命令判定 ─────────────────────────
+describe('parseTopicHeader（取代 parseForceTopicInvocation 的路由元命令判定）', () => {
+  /** 只关心「是不是 force-topic + 正文是什么」——这是旧 parseForceTopicInvocation 的全部契约。 */
+  function forceTopic(content: string): { prompt: string } | null {
+    const parsed = parseTopicHeader(content);
+    return isTopicHeader(parsed) ? { prompt: parsed.prompt } : null;
+  }
+
+  it('parses /t with prompt', () => {
+    expect(forceTopic('/t 帮我看看 X')).toEqual({ prompt: '帮我看看 X' });
   });
-  it('offers creation even when no running session exists', async () => {
-    process.env.BOTMUX_SHARED_ONLY_APP_ID=LARK_APP_ID;
-    const list=vi.spyOn(SharedSessionCreator.prototype,'list').mockResolvedValue([{id:'cc',revision:1,label:'新模型',harnessId:'claude-code'}]);
-    vi.mocked(discoverAdoptableSessions).mockReturnValue([]);
-    const ds=makeDaemonSession(),deps=makeDeps(ds);
-    try {
-      await handleCommand('/adopt',ROOT_ID,makeLarkMessage('/adopt'),deps,LARK_APP_ID);
-      expect(deps.sessionReply).toHaveBeenCalledWith(ROOT_ID,expect.stringContaining('shared_create'),'interactive',LARK_APP_ID,'msg_001');
-    } finally {list.mockRestore();delete process.env.BOTMUX_SHARED_ONLY_APP_ID;}
+
+  it('parses /topic with prompt', () => {
+    expect(forceTopic('/topic 帮我看看 Y')).toEqual({ prompt: '帮我看看 Y' });
   });
-  it('creates and attaches the exact new native identity; never calls fresh worker', async () => {
-    process.env.BOTMUX_SHARED_ONLY_APP_ID=LARK_APP_ID;
-    const create=vi.spyOn(SharedSessionCreator.prototype,'create').mockResolvedValue(created);
-    const ds=makeDaemonSession(),deps=makeDeps(ds);
-    try {
-      await handleCommand('/adopt',ROOT_ID,makeLarkMessage('/adopt new:cc'),deps,LARK_APP_ID);
-      expect(create).toHaveBeenCalledOnce();
-      expect(ds.adoptedFrom?.sessionId).toBe('native-new');
-      expect(forkAdoptWorker).toHaveBeenCalledWith(ds);
-      expect(forkWorker).not.toHaveBeenCalled();
-    } finally {create.mockRestore();delete process.env.BOTMUX_SHARED_ONLY_APP_ID;}
+
+  it('parses bare /t and bare /topic with an empty prompt', () => {
+    expect(forceTopic('/t')).toEqual({ prompt: '' });
+    expect(forceTopic('/topic')).toEqual({ prompt: '' });
   });
-  it('does not create for unauthorized users or bot senders', async () => {
-    process.env.BOTMUX_SHARED_ONLY_APP_ID=LARK_APP_ID;
-    const create=vi.spyOn(SharedSessionCreator.prototype,'create').mockResolvedValue(created);
-    try {
-      vi.mocked(canOperate).mockReturnValue(false);
-      await handleCommand('/adopt',ROOT_ID,makeLarkMessage('/adopt new:cc'),makeDeps(makeDaemonSession()),LARK_APP_ID);
-      vi.mocked(canOperate).mockReturnValue(true);
-      await handleCommand('/adopt',ROOT_ID,makeLarkMessage('/adopt new:cc',{senderType:'app'}),makeDeps(makeDaemonSession()),LARK_APP_ID);
-      expect(create).not.toHaveBeenCalled();
-    } finally {create.mockRestore();delete process.env.BOTMUX_SHARED_ONLY_APP_ID;}
+
+  it('is case-insensitive on the sentinel itself', () => {
+    expect(forceTopic('/T hello')).toEqual({ prompt: 'hello' });
+    expect(forceTopic('/Topic hello')).toEqual({ prompt: 'hello' });
   });
-  it('does not replace a connection selected while native creation was running', async () => {
-    process.env.BOTMUX_SHARED_ONLY_APP_ID=LARK_APP_ID;
-    const ds=makeDaemonSession(),deps=makeDeps(ds);
-    const existing={cliId:'claude-code' as const,originalCliPid:777,cwd:'/old',sessionId:'old-session'};
-    const create=vi.spyOn(SharedSessionCreator.prototype,'create').mockImplementation(async()=>{ds.adoptedFrom=existing;return created;});
-    try {
-      await handleCommand('/adopt',ROOT_ID,makeLarkMessage('/adopt new:cc'),deps,LARK_APP_ID);
-      expect(ds.adoptedFrom).toBe(existing);
-      expect(forkAdoptWorker).not.toHaveBeenCalled();
-      expect(deps.sessionReply).toHaveBeenCalledWith(ROOT_ID,expect.stringContaining('未替换现有连接'),'text',LARK_APP_ID,'msg_001');
-    } finally {create.mockRestore();delete process.env.BOTMUX_SHARED_ONLY_APP_ID;}
+
+  it('preserves multiline prompt content verbatim after the sentinel', () => {
+    expect(forceTopic('/t line1\nline2\nline3')).toEqual({ prompt: 'line1\nline2\nline3' });
+
+  });
+
+  it('retains cwd and worktree lifecycle aliases', () => {
+    // rebase 后上游 topic-header API 返回完整解析结果（ok/sentinel/lifecycle/...），
+    // 这里只锁生命周期别名语义本身。
+    const parse = (content: string) => {
+      const parsed = parseTopicHeader(content);
+      return isTopicHeader(parsed) ? parsed : null;
+    };
+    expect(parse('/t here 检查实现')).toMatchObject({ lifecycle: 'here', prompt: '检查实现' });
+    expect(parse('/topic worktree 检查实现')).toMatchObject({ lifecycle: 'worktree', prompt: '检查实现' });
+    expect(parse('/th 检查实现')).toMatchObject({ lifecycle: 'here', prompt: '检查实现' });
+    expect(parse('/tw 检查实现')).toMatchObject({ lifecycle: 'worktree', prompt: '检查实现' });
+  });
+
+  it('does not match similar prefixes', () => {
+    expect(forceTopic('/tea is good')).toBeNull();
+    expect(forceTopic('/talk to me')).toBeNull();
+    expect(forceTopic('/topical')).toBeNull();
+  });
+
+  it('tolerates leading whitespace', () => {
+    expect(forceTopic('  /t hello')).toEqual({ prompt: 'hello' });
+
+  });
+
+  it('returns null for non-slash text', () => {
+    expect(forceTopic('hello world')).toBeNull();
+    expect(forceTopic('')).toBeNull();
+  });
+
+  it('does not collide with parseSlashCommandInvocation outputs', () => {
+    // /close, /restart, /repo etc. must NOT be claimed as force-topic invocations.
+    expect(forceTopic('/close')).toBeNull();
+    expect(forceTopic('/restart')).toBeNull();
+    expect(forceTopic('/repo 1')).toBeNull();
+  });
+
+  it('刻意的行为变化：/t 之前的文字现在是可读标题，不再判为非 force-topic', () => {
+    // 旧 parseForceTopicInvocation 要求 `/t` 在第 0 位，`hello /t world` 返回 null。
+    // 新语法把 `/t` 之前的文字当标题（飞书话题列表显示的是原消息，bot 改不了标题，
+    // 所以可读文字必须排在最前）。护栏在 topic-header 的单测里：标题不得含 `/` 开头的
+    // token、不超过 3 行、归一化后不超过 200 字，否则仍判为非 force-topic。
+    expect(parseTopicHeader('hello /t world')).toMatchObject({ ok: true, title: 'hello', prompt: 'world' });
   });
 });

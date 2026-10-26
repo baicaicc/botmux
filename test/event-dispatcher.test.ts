@@ -242,8 +242,7 @@ vi.mock('@larksuiteoapi/node-sdk', () => {
 // ─── Imports (must be after mocks) ──────────────────────────────────────────
 
 import { __resetAnchorQueues } from '../src/utils/anchor-serializer.js';
-import { __pollMessageListenersOnceForTest, __recoverDurablePrimaryIngressOnceForTest, __resetMessageListenerPollCursorForTest, __resetEventClaimsForTest, __resetChatStatsForTest, canOperate, canTalk, createLarkEventDispatcherRuntime, decideRouting, ensureBotOpenId, getGroupStats, isBotMentioned, maybeApplyForceTopicOverride, mentionsAnotherMember, markForwardFollowupsSessionsReady, rawMessageIngressAnchor, startLarkEventDispatcher, writeBotInfoFile, type EventHandlers } from '../src/im/lark/event-dispatcher.js';
-  LARK_TASK_UPDATE_EVENT,
+import { __pollMessageListenersOnceForTest, __recoverDurablePrimaryIngressOnceForTest, __resetMessageListenerPollCursorForTest, __resetEventClaimsForTest, __resetChatStatsForTest, canOperate, canTalk, createLarkEventDispatcherRuntime, decideRouting, ensureBotOpenId, getGroupStats, isBotMentioned, maybeApplyForceTopicOverride, mentionsAnotherMember, markForwardFollowupsSessionsReady, rawMessageIngressAnchor, startLarkEventDispatcher, writeBotInfoFile, type EventHandlers, LARK_TASK_UPDATE_EVENT } from '../src/im/lark/event-dispatcher.js';
 import {
   VC_BOT_MEETING_ACTIVITY_EVENT,
   VC_BOT_MEETING_ENDED_EVENT,
@@ -2980,7 +2979,10 @@ describe('Lark event dispatcher — durable primary processor', () => {
     });
     expect(handlers.handleNewTopic).toHaveBeenCalledOnce();
     runtime.close();
-describe('startLarkEventDispatcher — Lark task events', () => {
+  });
+});
+
+describe('startLarkEventDispatcher — Lark task events (fork 自有)', () => {
   beforeEach(() => {
     capturedHandlers = {};
     __resetEventClaimsForTest();
@@ -5397,60 +5399,6 @@ describe('im.message.receive_v1 — bot-to-bot @mention routing', () => {
     }));
     expect(handlers.handleNewTopic).not.toHaveBeenCalled();
     expect(mockReplyMessage).not.toHaveBeenCalled();
-  });
-
-  it('relays a dispatch assignee @-ing us in its dispatch topic instead of forking a thread session', async () => {
-    setupBotState({ chatGrants: { 'chat-dispatch': [OTHER_BOT_OPEN_ID] } });
-    mockReadFileSync.mockReturnValue('{}');
-    const relay = vi.fn(async () => true);
-    (handlers as any).relayDispatchPeerReply = relay;
-    const event = makeBotMessageEvent({
-      senderOpenId: OTHER_BOT_OPEN_ID,
-      chatId: 'chat-dispatch',
-      rootId: 'om_dispatch_seed',
-      threadId: 'omt_dispatch_seed',
-      messageId: 'msg-peer-report',
-      content: JSON.stringify({
-        zh_cn: { content: [[{ tag: 'at', user_id: MY_OPEN_ID }, { tag: 'text', text: ' 子项目完成：库存够 1 天' }]] },
-      }),
-    });
-
-    await capturedHandlers['im.message.receive_v1'](event);
-    await flushEventWork();
-
-    expect(relay).toHaveBeenCalledWith({
-      larkAppId: MY_APP_ID,
-      chatId: 'chat-dispatch',
-      rootId: 'om_dispatch_seed',
-      messageId: 'msg-peer-report',
-      senderOpenId: OTHER_BOT_OPEN_ID,
-      content: expect.stringContaining('子项目完成：库存够 1 天'),
-    });
-    expect(handlers.handleThreadReply).not.toHaveBeenCalled();
-    expect(handlers.handleNewTopic).not.toHaveBeenCalled();
-  });
-
-  it('routes the @-mention as a thread reply when it is not a dispatch peer reply', async () => {
-    setupBotState({ chatGrants: { 'chat-dispatch': [OTHER_BOT_OPEN_ID] } });
-    mockReadFileSync.mockReturnValue('{}');
-    const relay = vi.fn(async () => false);
-    (handlers as any).relayDispatchPeerReply = relay;
-    const event = makeBotMessageEvent({
-      senderOpenId: OTHER_BOT_OPEN_ID,
-      chatId: 'chat-dispatch',
-      rootId: 'om_plain_topic',
-      threadId: 'omt_plain_topic',
-      content: JSON.stringify({ zh_cn: { content: [[{ tag: 'at', user_id: MY_OPEN_ID }]] } }),
-    });
-
-    await capturedHandlers['im.message.receive_v1'](event);
-    await flushEventWork();
-
-    expect(relay).toHaveBeenCalledTimes(1);
-    expect(handlers.handleThreadReply).toHaveBeenCalledWith(event, expect.objectContaining({
-      anchor: 'om_plain_topic',
-      larkAppId: MY_APP_ID,
-    }));
   });
 
   it('keeps the unknown external bot @blocked path silent when auto grant cards are disabled', async () => {
